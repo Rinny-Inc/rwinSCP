@@ -32,6 +32,11 @@ impl Transfer {
     }
 }
 
+pub struct Terminal {
+    pub output: String,
+    pub input: String,
+}
+
 pub struct Session {
     pub profile: ConnectionProfile,
     pub worker: WorkerHandle,
@@ -42,6 +47,7 @@ pub struct Session {
     pub anchor: Option<usize>,
     pub transfer: Option<Transfer>,
     pub loading: bool,
+    pub terminal: Option<Terminal>,
 }
 
 impl Session {
@@ -105,6 +111,7 @@ pub enum Action {
     Disconnect,
     Navigate(String),
     Refresh,
+    ShellSend,
     Download,
     Upload,
     Mkdir,
@@ -244,6 +251,16 @@ impl App {
                 }
             }
 
+            Action::ShellSend => {
+                if let Some(session) = &mut self.session
+                    && let Some(terminal) = &mut session.terminal
+                {
+                    let mut line = std::mem::take(&mut terminal.input);
+                    line.push('\n');
+                    session.worker.send(Command::ShellInput(line));
+                }
+            }
+
             Action::Refresh => {
                 if let Some(session) = &mut self.session {
                     session.refresh();
@@ -314,6 +331,7 @@ impl App {
 
         let profile = host.profile.clone();
         let start_dir = profile.remote_start_dir.clone();
+        let is_shell = profile.protocol == Protocol::Ssh;
         self.info(format!("Connecting to {}...", profile.endpoint()));
 
         self.session = Some(Session {
@@ -326,6 +344,10 @@ impl App {
             anchor: None,
             transfer: None,
             loading: true,
+            terminal: is_shell.then(|| Terminal {
+                output: String::new(),
+                input: String::new(),
+            }),
         });
     }
 
@@ -406,6 +428,8 @@ impl App {
                     if session.profile.protocol.browsable() {
                         let cwd = session.cwd.clone();
                         session.navigate(cwd);
+                    } else {
+                        session.loading = false;
                     }
                 }
 
@@ -447,6 +471,13 @@ impl App {
 
                 Event::ExecOutput(output) => {
                     logs.push((output, LogLevel::Info));
+                }
+
+                Event::ShellOutput(chunk) => {
+                    if let Some(terminal) = &mut session.terminal {
+                        append_terminal_output(&mut terminal.output, &chunk);
+                    }
+                    busy = true;
                 }
 
                 Event::Error(message) => {
@@ -542,5 +573,61 @@ pub fn ellipsize(text: &str, max_chars: usize) -> String {
     } else {
         let keep = max_chars.saturating_sub(1);
         text.chars().take(keep).collect::<String>() + "\u{2026}"
+    }
+}
+
+const TERMINAL_CAPACITY: usize = 120_000;
+
+pub fn append_terminal_output(buffer: &mut String, chunk: &str) {
+    let mut chars = chunk.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1B}' => match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7E}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                        if c == '\u{1B}' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                    buffer.push('\n');
+                } else {
+                    let line_start = buffer.rfind('\n').map_or(0, |i| i + 1);
+                    buffer.truncate(line_start);
+                }
+            }
+            '\u{8}' => {
+                buffer.pop();
+            }
+
+            c if c.is_control() && c != '\n' && c != '\t' => {}
+
+            c => buffer.push(c),
+        }
+    }
+
+    if buffer.len() > TERMINAL_CAPACITY {
+        let excess = buffer.len() - TERMINAL_CAPACITY;
+        let cut = buffer[excess..]
+            .find('\n')
+            .map_or(excess, |i| excess + i + 1);
+        buffer.drain(..cut);
     }
 }

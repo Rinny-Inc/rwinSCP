@@ -4,6 +4,7 @@ pub mod explorer;
 pub mod host_card;
 pub mod log_panel;
 pub mod rail;
+pub mod terminal;
 pub mod widgets;
 
 use egui::Ui;
@@ -48,10 +49,10 @@ pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 }),
         )
         .show(ui, |ui| {
-            let view = if app.session.is_some() {
-                explorer::show(app, ui)
-            } else {
-                dashboard::show(app, ui)
+            let view = match &app.session {
+                Some(session) if session.terminal.is_some() => terminal::show(app, ui),
+                Some(_) => explorer::show(app, ui),
+                None => dashboard::show(app, ui),
             };
             keep(&mut action, view);
         });

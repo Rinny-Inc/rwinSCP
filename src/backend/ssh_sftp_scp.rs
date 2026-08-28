@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use ssh2::Session;
@@ -11,6 +11,10 @@ use super::{CHUNK, Command, Event, RemoteEntry};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const SHELL_IDLE: Duration = Duration::from_millis(20);
+
+const PTY_COLS: u32 = 120;
+const PTY_ROWS: u32 = 34;
 
 pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
     let session = match connect(&profile) {
@@ -21,6 +25,16 @@ pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender
         }
     };
     evt_tx.send(Event::Connected).ok();
+
+    if profile.protocol == Protocol::Ssh {
+        if let Err(e) = run_shell(&session, cmd_rx, &evt_tx) {
+            evt_tx.send(Event::Error(e.to_string())).ok();
+        }
+        session.set_blocking(true);
+        session.disconnect(None, "bye", None).ok();
+        evt_tx.send(Event::Disconnected).ok();
+        return;
+    }
 
     let sftp = matches!(profile.protocol, Protocol::Sftp | Protocol::Scp)
         .then(|| session.sftp().ok())
@@ -68,6 +82,97 @@ fn connect(profile: &ConnectionProfile) -> anyhow::Result<Session> {
         anyhow::bail!("authentication failed");
     }
     Ok(session)
+}
+
+fn run_shell(
+    session: &Session,
+    cmd_rx: Receiver<Command>,
+    evt_tx: &Sender<Event>,
+) -> anyhow::Result<()> {
+    let mut channel = session.channel_session()?;
+    channel.request_pty("xterm-256color", None, Some((PTY_COLS, PTY_ROWS, 0, 0)))?;
+    channel.shell()?;
+
+    session.set_blocking(false);
+
+    let mut buf = [0u8; 8192];
+    let result = loop {
+        let mut stop = false;
+        let mut fatal = None;
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(Command::ShellInput(data)) => {
+                    session.set_blocking(true);
+                    let written = channel
+                        .write_all(data.as_bytes())
+                        .and_then(|()| channel.flush());
+                    session.set_blocking(false);
+                    if let Err(e) = written {
+                        fatal = Some(anyhow::Error::from(e));
+                        break;
+                    }
+                }
+                Ok(Command::Disconnect) | Err(TryRecvError::Disconnected) => {
+                    stop = true;
+                    break;
+                }
+                Ok(_) => {
+                    evt_tx
+                        .send(Event::Error(
+                            "That operation needs SFTP; this is a shell session".to_owned(),
+                        ))
+                        .ok();
+                }
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        if let Some(e) = fatal {
+            break Err(e);
+        }
+        if stop {
+            break Ok(());
+        }
+
+        let mut idle = true;
+        match channel.read(&mut buf) {
+            Ok(0) => {
+                if channel.eof() {
+                    break Ok(());
+                }
+            }
+            Ok(n) => {
+                idle = false;
+                evt_tx
+                    .send(Event::ShellOutput(
+                        String::from_utf8_lossy(&buf[..n]).into_owned(),
+                    ))
+                    .ok();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => break Err(anyhow::Error::from(e)),
+        }
+
+        match channel.stderr().read(&mut buf) {
+            Ok(n) if n > 0 => {
+                idle = false;
+                evt_tx
+                    .send(Event::ShellOutput(
+                        String::from_utf8_lossy(&buf[..n]).into_owned(),
+                    ))
+                    .ok();
+            }
+            _ => {}
+        }
+
+        if idle {
+            std::thread::sleep(SHELL_IDLE);
+        }
+    };
+
+    session.set_blocking(true);
+    channel.close().ok();
+    channel.wait_close().ok();
+    result
 }
 
 fn handle(
@@ -182,6 +287,10 @@ fn handle(
             }
             channel.wait_close()?;
             evt_tx.send(Event::ExecOutput(output)).ok();
+        }
+
+        Command::ShellInput(_) => {
+            anyhow::bail!("the interactive shell is only available over SSH")
         }
 
         Command::Disconnect => {}

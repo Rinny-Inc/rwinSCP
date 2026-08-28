@@ -104,6 +104,8 @@ fn handle(ftp: &mut FtpStream, cmd: &Command, evt_tx: &Sender<Event>) -> anyhow:
 
         Command::Rename { from, to } => ftp.rename(from, to)?,
 
+        Command::ShellInput(_) => anyhow::bail!("FTP has no remote shell"),
+
         Command::Exec { .. } => anyhow::bail!("FTP has no remote shell"),
 
         Command::Disconnect => {}

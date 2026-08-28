@@ -44,6 +44,8 @@ pub enum Command {
     Exec {
         command: String,
     },
+    /// SSH only: raw bytes typed into interactive shell
+    ShellInput(String),
     Disconnect,
 }
 
@@ -65,6 +67,7 @@ pub enum Event {
         label: String,
     },
     ExecOutput(String),
+    ShellOutput(String),
     Error(String),
     Disconnected,
 }

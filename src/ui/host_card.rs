@@ -34,8 +34,13 @@ pub fn show(ui: &mut Ui, index: usize, host: &Host) -> Option<Action> {
                 {
                     action = Some(Action::EditHost(index));
                 }
-                if widgets::ghost_button(ui, icon::ARROW_RIGHT, profile.protocol.browsable())
-                    .on_hover_text("Open explorer")
+                let open_hint = if profile.protocol.browsable() {
+                    "Open explorer"
+                } else {
+                    "Open shell"
+                };
+                if widgets::ghost_button(ui, icon::ARROW_RIGHT, true)
+                    .on_hover_text(open_hint)
                     .clicked()
                 {
                     action = Some(Action::Connect(index));
