@@ -3,61 +3,65 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
 
 use ssh2::Session;
 
-use super::{Command, Event, RemoteEntry};
+use super::{CHUNK, Command, Event, RemoteEntry};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
 
-const CHUNK: usize = 64 * 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
     let session = match connect(&profile) {
-        Ok(s) => s,
+        Ok(session) => session,
         Err(e) => {
-            let _ = evt_tx.send(Event::ConnectFailed(e.to_string()));
+            evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
             return;
         }
     };
     evt_tx.send(Event::Connected).ok();
 
-    let sftp = if matches!(profile.protocol, Protocol::Sftp | Protocol::Scp) {
-        session.sftp().ok()
-    } else {
-        None
-    };
+    let sftp = matches!(profile.protocol, Protocol::Sftp | Protocol::Scp)
+        .then(|| session.sftp().ok())
+        .flatten();
 
     while let Ok(cmd) = cmd_rx.recv() {
-        let result = handle(&profile, &session, sftp.as_ref(), &cmd, &evt_tx);
-        if let Err(e) = result {
+        let stop = matches!(cmd, Command::Disconnect);
+        if let Err(e) = handle(&profile, &session, sftp.as_ref(), &cmd, &evt_tx) {
             evt_tx.send(Event::Error(e.to_string())).ok();
         }
-        if matches!(cmd, Command::Disconnect) {
+        if stop {
             break;
         }
     }
+
+    session.disconnect(None, "bye", None).ok();
     evt_tx.send(Event::Disconnected).ok();
 }
 
 fn connect(profile: &ConnectionProfile) -> anyhow::Result<Session> {
-    let tcp = TcpStream::connect((profile.host.as_str(), profile.port))?;
+    let address = format!("{}:{}", profile.host, profile.port);
+    let socket_addr = std::net::ToSocketAddrs::to_socket_addrs(&address)?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve {address}"))?;
+
+    let tcp = TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT)?;
+    tcp.set_nodelay(true).ok();
+
     let mut session = Session::new()?;
     session.set_tcp_stream(tcp);
     session.handshake()?;
 
     match &profile.auth {
-        Auth::Password(pw) => {
-            session.userauth_password(&profile.username, pw)?;
+        Auth::Password(password) => {
+            session.userauth_password(&profile.username, password)?;
         }
         Auth::KeyFile { path, passphrase } => {
-            let pass = if passphrase.is_empty() {
-                None
-            } else {
-                Some(passphrase.as_str())
-            };
-            session.userauth_pubkey_file(&profile.username, None, Path::new(path), pass)?;
+            let passphrase = (!passphrase.is_empty()).then_some(passphrase.as_str());
+            session.userauth_pubkey_file(&profile.username, None, Path::new(path), passphrase)?;
         }
-        Auth::S3Keys { .. } => anyhow::bail!("S3 credentials are not valid for SSH"),
+        Auth::S3Keys { .. } => anyhow::bail!("S3 credentials cannot authenticate an SSH session"),
     }
 
     if !session.authenticated() {
@@ -73,22 +77,20 @@ fn handle(
     cmd: &Command,
     evt_tx: &Sender<Event>,
 ) -> anyhow::Result<()> {
+    let need_sftp = || sftp.ok_or_else(|| anyhow::anyhow!("this operation requires SFTP"));
+
     match cmd {
         Command::List { path } => {
-            let sftp = sftp.ok_or_else(|| anyhow::anyhow!("directory listing needs SFTP"))?;
-            let entries = sftp
+            let entries = need_sftp()?
                 .readdir(Path::new(path))?
                 .into_iter()
-                .filter_map(|(p, stat)| {
-                    let name = p.file_name()?.to_string_lossy().to_string();
-                    if name == "." || name == ".." {
-                        return None;
-                    }
-                    Some(RemoteEntry {
+                .filter_map(|(entry_path, stat)| {
+                    let name = entry_path.file_name()?.to_string_lossy().into_owned();
+                    (name != "." && name != "..").then(|| RemoteEntry {
                         name,
                         is_dir: stat.is_dir(),
                         size: stat.size.unwrap_or(0),
-                        modified: stat.mtime.map(|t| t.to_string()),
+                        modified: stat.mtime.map(format_unix_time),
                     })
                 })
                 .collect();
@@ -107,17 +109,15 @@ fn handle(
             let mut local = File::create(local_path)?;
             match profile.protocol {
                 Protocol::Sftp => {
-                    let sftp = sftp.ok_or_else(|| anyhow::anyhow!("no sftp channel"))?;
-                    let mut remote = sftp.open(Path::new(remote_path))?;
+                    let mut remote = need_sftp()?.open(Path::new(remote_path))?;
                     let total = remote.stat()?.size.unwrap_or(0);
-                    copy_with_progress(&mut remote, &mut local, total, remote_path, evt_tx)?;
+                    pump(&mut remote, &mut local, total, remote_path, evt_tx)?;
                 }
                 Protocol::Scp => {
                     let (mut remote, stat) = session.scp_recv(Path::new(remote_path))?;
-                    let total = stat.size();
-                    copy_with_progress(&mut remote, &mut local, total, remote_path, evt_tx)?;
+                    pump(&mut remote, &mut local, stat.size(), remote_path, evt_tx)?;
                 }
-                _ => anyhow::bail!("download not supported for this protocol"),
+                _ => anyhow::bail!("{} cannot transfer files", profile.protocol),
             }
             evt_tx
                 .send(Event::TransferDone {
@@ -134,16 +134,19 @@ fn handle(
             let total = local.metadata()?.len();
             match profile.protocol {
                 Protocol::Sftp => {
-                    let sftp = sftp.ok_or_else(|| anyhow::anyhow!("no sftp channel"))?;
-                    let mut remote = sftp.create(Path::new(remote_path))?;
-                    copy_with_progress(&mut local, &mut remote, total, remote_path, evt_tx)?;
+                    let mut remote = need_sftp()?.create(Path::new(remote_path))?;
+                    pump(&mut local, &mut remote, total, remote_path, evt_tx)?;
                 }
                 Protocol::Scp => {
-                    let mode = 0o644;
-                    let mut remote = session.scp_send(Path::new(remote_path), mode, total, None)?;
-                    copy_with_progress(&mut local, &mut remote, total, remote_path, evt_tx)?;
+                    let mut remote =
+                        session.scp_send(Path::new(remote_path), 0o644, total, None)?;
+                    pump(&mut local, &mut remote, total, remote_path, evt_tx)?;
+                    remote.send_eof()?;
+                    remote.wait_eof()?;
+                    remote.close()?;
+                    remote.wait_close()?;
                 }
-                _ => anyhow::bail!("upload not supported for this protocol"),
+                _ => anyhow::bail!("{} cannot transfer files", profile.protocol),
             }
             evt_tx
                 .send(Event::TransferDone {
@@ -152,13 +155,10 @@ fn handle(
                 .ok();
         }
 
-        Command::Mkdir { path } => {
-            let sftp = sftp.ok_or_else(|| anyhow::anyhow!("no sftp channel"))?;
-            sftp.mkdir(Path::new(path), 0o755)?;
-        }
+        Command::Mkdir { path } => need_sftp()?.mkdir(Path::new(path), 0o755)?,
 
         Command::Delete { path, is_dir } => {
-            let sftp = sftp.ok_or_else(|| anyhow::anyhow!("no sftp channel"))?;
+            let sftp = need_sftp()?;
             if *is_dir {
                 sftp.rmdir(Path::new(path))?;
             } else {
@@ -167,8 +167,7 @@ fn handle(
         }
 
         Command::Rename { from, to } => {
-            let sftp = sftp.ok_or_else(|| anyhow::anyhow!("no sftp channel"))?;
-            sftp.rename(Path::new(from), Path::new(to), None)?;
+            need_sftp()?.rename(Path::new(from), Path::new(to), None)?;
         }
 
         Command::Exec { command } => {
@@ -176,6 +175,11 @@ fn handle(
             channel.exec(command)?;
             let mut output = String::new();
             channel.read_to_string(&mut output)?;
+            let mut stderr = String::new();
+            channel.stderr().read_to_string(&mut stderr).ok();
+            if !stderr.is_empty() {
+                output.push_str(&stderr);
+            }
             channel.wait_close()?;
             evt_tx.send(Event::ExecOutput(output)).ok();
         }
@@ -185,30 +189,38 @@ fn handle(
     Ok(())
 }
 
-fn copy_with_progress<R: Read, W: Write>(
+fn pump<R: Read, W: Write>(
     src: &mut R,
     dst: &mut W,
     total: u64,
     label: &str,
     evt_tx: &Sender<Event>,
 ) -> anyhow::Result<()> {
-    let mut buf = [0u8; CHUNK];
-    let mut transferred: u64 = 0;
+    let mut buf = vec![0u8; CHUNK];
+    let mut transferred = 0u64;
+
     loop {
-        let n = src.read(&mut buf)?;
-        if n == 0 {
+        let read = src.read(&mut buf)?;
+        if read == 0 {
             break;
         }
-        dst.write_all(&buf[..n])?;
-        transferred += n as u64;
+        dst.write_all(&buf[..read])?;
+        transferred += read as u64;
         evt_tx
             .send(Event::Progress {
                 transferred,
                 total,
-                label: label.to_string(),
+                label: label.to_owned(),
             })
             .ok();
     }
+
     dst.flush()?;
     Ok(())
+}
+
+fn format_unix_time(secs: u64) -> String {
+    chrono::DateTime::from_timestamp(secs as i64, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default()
 }

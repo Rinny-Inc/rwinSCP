@@ -3,13 +3,14 @@ use std::io::{BufReader, BufWriter};
 use std::sync::mpsc::{Receiver, Sender};
 
 use suppaftp::FtpStream;
+use suppaftp::types::FileType;
 
 use super::{Command, Event, RemoteEntry};
 use crate::connection::{Auth, ConnectionProfile};
 
 pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
     let mut ftp = match connect(&profile) {
-        Ok(f) => f,
+        Ok(ftp) => ftp,
         Err(e) => {
             evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
             return;
@@ -18,25 +19,28 @@ pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender
     evt_tx.send(Event::Connected).ok();
 
     while let Ok(cmd) = cmd_rx.recv() {
+        let stop = matches!(cmd, Command::Disconnect);
         if let Err(e) = handle(&mut ftp, &cmd, &evt_tx) {
             evt_tx.send(Event::Error(e.to_string())).ok();
         }
-        if matches!(cmd, Command::Disconnect) {
+        if stop {
             break;
         }
     }
+
     ftp.quit().ok();
     evt_tx.send(Event::Disconnected).ok();
 }
 
 fn connect(profile: &ConnectionProfile) -> anyhow::Result<FtpStream> {
-    let mut ftp = FtpStream::connect((profile.host.as_str(), profile.port))?;
-    let password = match &profile.auth {
-        Auth::Password(pw) => pw.clone(),
-        _ => anyhow::bail!("FTP requires a username/password"),
+    let Auth::Password(password) = &profile.auth else {
+        anyhow::bail!("FTP requires username/password authentication");
     };
-    ftp.login(&profile.username, &password)?;
-    ftp.transfer_type(suppaftp::types::FileType::Binary)?;
+
+    let mut ftp = FtpStream::connect((profile.host.as_str(), profile.port))?;
+    ftp.login(&profile.username, password)?;
+    ftp.transfer_type(FileType::Binary)?;
+
     if !profile.remote_start_dir.is_empty() {
         ftp.cwd(&profile.remote_start_dir).ok();
     }
@@ -47,8 +51,11 @@ fn handle(ftp: &mut FtpStream, cmd: &Command, evt_tx: &Sender<Event>) -> anyhow:
     match cmd {
         Command::List { path } => {
             ftp.cwd(path)?;
-            let lines = ftp.list(None)?;
-            let entries = lines.iter().filter_map(|l| parse_list_line(l)).collect();
+            let entries = ftp
+                .list(None)?
+                .iter()
+                .filter_map(|line| parse_list_line(line))
+                .collect();
             evt_tx
                 .send(Event::Listing {
                     path: path.clone(),
@@ -85,9 +92,7 @@ fn handle(ftp: &mut FtpStream, cmd: &Command, evt_tx: &Sender<Event>) -> anyhow:
                 .ok();
         }
 
-        Command::Mkdir { path } => {
-            ftp.mkdir(path)?;
-        }
+        Command::Mkdir { path } => ftp.mkdir(path)?,
 
         Command::Delete { path, is_dir } => {
             if *is_dir {
@@ -97,35 +102,37 @@ fn handle(ftp: &mut FtpStream, cmd: &Command, evt_tx: &Sender<Event>) -> anyhow:
             }
         }
 
-        Command::Rename { from, to } => {
-            ftp.rename(from, to)?;
-        }
+        Command::Rename { from, to } => ftp.rename(from, to)?,
 
-        Command::Exec { .. } => {
-            anyhow::bail!("FTP has no remote shell; use SSH for that");
-        }
+        Command::Exec { .. } => anyhow::bail!("FTP has no remote shell"),
 
         Command::Disconnect => {}
     }
     Ok(())
 }
 
+/// `drwxr-xr-x  2 user group 4096 Jan  1 00:00 some name with spaces`
 fn parse_list_line(line: &str) -> Option<RemoteEntry> {
-    let parts: Vec<&str> = line
-        .splitn(9, char::is_whitespace)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if parts.len() < 9 {
+    let mut fields = line.split_whitespace();
+    let permissions = fields.next()?;
+    let _links = fields.next()?;
+    let _owner = fields.next()?;
+    let _group = fields.next()?;
+    let size = fields.next()?;
+    let month = fields.next()?;
+    let day = fields.next()?;
+    let time_or_year = fields.next()?;
+
+    let name_offset = line.find(time_or_year).map(|i| i + time_or_year.len())?;
+    let name = line[name_offset..].trim_start();
+    if name.is_empty() || name == "." || name == ".." {
         return None;
     }
-    let is_dir = parts[0].starts_with('d');
-    let size = parts[4].parse::<u64>().unwrap_or(0);
-    let modified = format!("{} {} {}", parts[5], parts[6], parts[7]);
-    let name = parts[8].to_string();
+
     Some(RemoteEntry {
-        name,
-        is_dir,
-        size,
-        modified: Some(modified),
+        name: name.to_owned(),
+        is_dir: permissions.starts_with('d'),
+        size: size.parse().unwrap_or(0),
+        modified: Some(format!("{month} {day} {time_or_year}")),
     })
 }

@@ -18,9 +18,9 @@ impl Protocol {
         Protocol::S3,
     ];
 
-    pub fn label(&self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Protocol::Ssh => "SSH (shell)",
+            Protocol::Ssh => "SSH",
             Protocol::Sftp => "SFTP",
             Protocol::Scp => "SCP",
             Protocol::Ftp => "FTP",
@@ -28,33 +28,56 @@ impl Protocol {
         }
     }
 
-    pub fn default_port(&self) -> u16 {
+    pub fn default_port(self) -> u16 {
         match self {
             Protocol::Ssh | Protocol::Sftp | Protocol::Scp => 22,
             Protocol::Ftp => 21,
             Protocol::S3 => 443,
         }
     }
+
+    pub fn browsable(self) -> bool {
+        matches!(
+            self,
+            Protocol::Sftp | Protocol::Scp | Protocol::Ftp | Protocol::S3
+        )
+    }
+
+    pub fn is_object_store(self) -> bool {
+        matches!(self, Protocol::S3)
+    }
 }
 
 impl fmt::Display for Protocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.label())
+        f.write_str(self.label())
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Auth {
     Password(String),
     KeyFile {
         path: String,
         passphrase: String,
     },
-    /// S3 access key / secret key pair.
     S3Keys {
         access_key: String,
         secret_key: String,
     },
+}
+
+impl Auth {
+    pub fn for_protocol(protocol: Protocol) -> Self {
+        if protocol.is_object_store() {
+            Auth::S3Keys {
+                access_key: String::new(),
+                secret_key: String::new(),
+            }
+        } else {
+            Auth::Password(String::new())
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,24 +88,79 @@ pub struct ConnectionProfile {
     pub port: u16,
     pub username: String,
     pub auth: Auth,
-    /// S3 bucket name / region, unused for other protocols
+    /// S3 only.
     pub bucket: String,
     pub region: String,
     pub remote_start_dir: String,
 }
 
-impl Default for ConnectionProfile {
-    fn default() -> Self {
+impl ConnectionProfile {
+    pub fn new(protocol: Protocol) -> Self {
         Self {
-            name: "New connection".into(),
-            protocol: Protocol::Sftp,
+            name: String::new(),
+            protocol,
             host: String::new(),
-            port: Protocol::Sftp.default_port(),
+            port: protocol.default_port(),
             username: String::new(),
-            auth: Auth::Password(String::new()),
+            auth: Auth::for_protocol(protocol),
             bucket: String::new(),
             region: "us-east-1".into(),
             remote_start_dir: "/".into(),
         }
+    }
+
+    pub fn display_name(&self) -> &str {
+        if !self.name.trim().is_empty() {
+            self.name.trim()
+        } else if self.protocol.is_object_store() {
+            self.bucket.as_str()
+        } else {
+            self.host.as_str()
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        if self.protocol.is_object_store() {
+            format!("{} · {}/{}", self.protocol, self.region, self.bucket)
+        } else if self.username.is_empty() {
+            format!("{} · {}:{}", self.protocol, self.host, self.port)
+        } else {
+            format!(
+                "{} · {}@{}:{}",
+                self.protocol, self.username, self.host, self.port
+            )
+        }
+    }
+
+    pub fn is_connectable(&self) -> bool {
+        if self.protocol.is_object_store() {
+            !self.bucket.trim().is_empty()
+        } else {
+            !self.host.trim().is_empty()
+        }
+    }
+
+    pub fn set_protocol(&mut self, protocol: Protocol) {
+        if self.protocol == protocol {
+            return;
+        }
+        let had_default_port = self.port == self.protocol.default_port();
+        self.protocol = protocol;
+        if had_default_port {
+            self.port = protocol.default_port();
+        }
+        let compatible = matches!(
+            (&self.auth, protocol.is_object_store()),
+            (Auth::S3Keys { .. }, true) | (Auth::Password(_) | Auth::KeyFile { .. }, false)
+        );
+        if !compatible {
+            self.auth = Auth::for_protocol(protocol);
+        }
+    }
+}
+
+impl Default for ConnectionProfile {
+    fn default() -> Self {
+        Self::new(Protocol::Sftp)
     }
 }

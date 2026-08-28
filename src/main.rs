@@ -1,11 +1,16 @@
 mod app;
 mod backend;
 mod connection;
+mod icon;
 mod theme;
+mod ui;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 720.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1180.0, 780.0])
+            .with_min_inner_size([880.0, 560.0])
+            .with_title("rwinSCP"),
         ..Default::default()
     };
 
@@ -13,7 +18,7 @@ fn main() -> eframe::Result<()> {
         "rwinSCP",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(theme::visuals());
+            theme::install(&cc.egui_ctx);
             Ok(Box::new(app::App::default()))
         }),
     )

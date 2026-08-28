@@ -5,7 +5,7 @@ pub mod ssh_sftp_scp;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::connection::ConnectionProfile;
+use crate::connection::{ConnectionProfile, Protocol};
 
 #[derive(Debug, Clone)]
 pub struct RemoteEntry {
@@ -15,6 +15,7 @@ pub struct RemoteEntry {
     pub modified: Option<String>,
 }
 
+/// UI -> worker.
 #[derive(Debug)]
 pub enum Command {
     List {
@@ -39,12 +40,14 @@ pub enum Command {
         from: String,
         to: String,
     },
+    /// SSH only: run a shell command, return combined output.
     Exec {
         command: String,
     },
     Disconnect,
 }
 
+/// Worker -> UI.
 #[derive(Debug)]
 pub enum Event {
     Connected,
@@ -67,16 +70,27 @@ pub enum Event {
 }
 
 pub struct WorkerHandle {
-    pub tx: Sender<Command>,
-    pub rx: Receiver<Event>,
-    pub thread: std::thread::JoinHandle<()>,
+    tx: Sender<Command>,
+    rx: Receiver<Event>,
+    thread: std::thread::JoinHandle<()>,
 }
 
-pub fn spawn(profile: ConnectionProfile) -> WorkerHandle {
-    use crate::connection::Protocol;
+impl WorkerHandle {
+    /// Fire-and-forget send
+    pub fn send(&self, cmd: Command) {
+        self.tx.send(cmd).ok();
+    }
 
-    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Command>();
-    let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Event>();
+    /// Non-blocking drain of pending events.
+    pub fn try_recv(&self) -> Result<Event, std::sync::mpsc::TryRecvError> {
+        self.rx.try_recv()
+    }
+}
+
+/// Spawns the worker for a profile's protocol
+pub fn spawn(profile: ConnectionProfile) -> WorkerHandle {
+    let (tx, cmd_rx) = std::sync::mpsc::channel::<Command>();
+    let (evt_tx, rx) = std::sync::mpsc::channel::<Event>();
 
     let thread = match profile.protocol {
         Protocol::Ssh | Protocol::Sftp | Protocol::Scp => {
@@ -87,8 +101,11 @@ pub fn spawn(profile: ConnectionProfile) -> WorkerHandle {
     };
 
     WorkerHandle {
-        tx: cmd_tx,
-        rx: evt_rx,
-        thread,
+        tx,
+        rx,
+        thread: thread,
     }
 }
+
+/// Shared chunk size for streamed transfers
+pub(crate) const CHUNK: usize = 64 * 1024;
