@@ -57,11 +57,7 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
                                 .small(),
                         );
                     } else {
-                        ui.label(
-                            RichText::new(terminal.output.trim_start_matches('\n'))
-                                .color(theme::TEXT)
-                                .monospace(),
-                        );
+                        draw_output(ui, terminal.output.trim_start_matches('\n'));
                     }
                 });
             });
@@ -106,15 +102,49 @@ fn encode_events(events: &[Event]) -> String {
 }
 
 fn encode_key(key: Key, modifiers: Modifiers) -> Option<String> {
-    // Ctrl+letter maps onto the C0 control codes: Ctrl+C is 0x03, and so on
-    if modifiers.ctrl
-        && !modifiers.shift
-        && let Some(name) = key.name().chars().next()
-    {
-        let upper = name.to_ascii_uppercase();
-        if upper.is_ascii_alphabetic() {
-            return Some(char::from(upper as u8 - b'A' + 1).to_string());
+    if modifiers.ctrl && !modifiers.shift {
+        let name = key.name();
+        let mut chars = name.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            let upper = c.to_ascii_uppercase();
+            if upper.is_ascii_uppercase() {
+                return Some(char::from(upper as u8 - b'A' + 1).to_string());
+            }
         }
+        if key == Key::Space {
+            return Some("\0".to_owned());
+        }
+    }
+
+    let modifier =
+        1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt) + 4 * u8::from(modifiers.ctrl);
+
+    let cursor_final = match key {
+        Key::ArrowUp => Some('A'),
+        Key::ArrowDown => Some('B'),
+        Key::ArrowRight => Some('C'),
+        Key::ArrowLeft => Some('D'),
+        Key::Home => Some('H'),
+        Key::End => Some('F'),
+        _ => None,
+    };
+
+    let modifier_is_one = modifier == 1;
+
+    if let Some(final_byte) = cursor_final {
+        return Some(if modifier_is_one {
+            format!("\x1b[{final_byte}")
+        } else {
+            format!("\x1b[1;{modifier}{final_byte}")
+        });
+    }
+
+    if key == Key::Delete {
+        return Some(if modifier_is_one {
+            "\u{1B}[3~".to_owned()
+        } else {
+            format!("\x1b[3;{modifier}~")
+        });
     }
 
     let seq = match key {
@@ -122,17 +152,42 @@ fn encode_key(key: Key, modifiers: Modifiers) -> Option<String> {
         Key::Backspace => "\u{7F}",
         Key::Tab => "\t",
         Key::Escape => "\u{1B}",
-        Key::ArrowUp => "\u{1B}[A",
-        Key::ArrowDown => "\u{1B}[B",
-        Key::ArrowRight => "\u{1B}[C",
-        Key::ArrowLeft => "\u{1B}[D",
-        Key::Home => "\u{1B}[H",
-        Key::End => "\u{1B}[F",
-        Key::Delete => "\u{1B}[3~",
         Key::PageUp => "\u{1B}[5~",
         Key::PageDown => "\u{1B}[6~",
         _ => return None,
     };
 
     Some(seq.to_owned())
+}
+
+const CURSOR_BLINK: f64 = 0.53;
+
+fn draw_output(ui: &mut Ui, text: &str) {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let row_height = ui.fonts_mut(|f| f.row_height(&font));
+    let wrap_width = ui.available_width();
+
+    let galley = ui.fonts_mut(|f| f.layout(text.to_owned(), font.clone(), theme::TEXT, wrap_width));
+
+    let size = egui::vec2(galley.size().x.max(1.0), galley.size().y + row_height);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+
+    let end = galley.end();
+    let caret = galley.pos_from_cursor(end).min;
+    ui.painter().galley(rect.min, galley, theme::TEXT);
+
+    let time = ui.input(|i| i.time);
+    let visible = (time / CURSOR_BLINK) as i64 & 1 == 0;
+    if visible {
+        let advance = ui.fonts_mut(|f| f.glyph_width(&font, ' '));
+        let cursor_rect = egui::Rect::from_min_size(
+            rect.min + caret.to_vec2(),
+            egui::vec2(advance.max(2.0), row_height),
+        );
+        ui.painter()
+            .rect_filled(cursor_rect, 1, theme::tint(theme::ACCENT, 200));
+    }
+
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs_f64(CURSOR_BLINK));
 }

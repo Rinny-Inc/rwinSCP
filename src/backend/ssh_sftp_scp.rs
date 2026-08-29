@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ssh2::Session;
 
@@ -12,6 +12,9 @@ use crate::connection::{Auth, ConnectionProfile, Protocol};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const SHELL_IDLE: Duration = Duration::from_millis(20);
+
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_RETRY: Duration = Duration::from_millis(5);
 
 const PTY_COLS: u32 = 120;
 const PTY_ROWS: u32 = 34;
@@ -102,14 +105,23 @@ fn run_shell(
         loop {
             match cmd_rx.try_recv() {
                 Ok(Command::ShellInput(data)) => {
-                    session.set_blocking(true);
-                    let written = channel
-                        .write_all(data.as_bytes())
-                        .and_then(|()| channel.flush());
-                    session.set_blocking(false);
-                    if let Err(e) = written {
-                        fatal = Some(anyhow::Error::from(e));
-                        break;
+                    let mut pending = data.as_bytes();
+                    let deadline = Instant::now() + WRITE_TIMEOUT;
+                    while !pending.is_empty() {
+                        match channel.write(pending) {
+                            Ok(0) => break,
+                            Ok(n) => pending = &pending[n..],
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                if Instant::now() > deadline {
+                                    break;
+                                }
+                                std::thread::sleep(WRITE_RETRY);
+                            }
+                            Err(e) => {
+                                fatal = Some(anyhow::Error::from(e));
+                                break;
+                            }
+                        }
                     }
                 }
                 Ok(Command::Disconnect) | Err(TryRecvError::Disconnected) => {
@@ -150,18 +162,6 @@ fn run_shell(
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => break Err(anyhow::Error::from(e)),
-        }
-
-        match channel.stderr().read(&mut buf) {
-            Ok(n) if n > 0 => {
-                idle = false;
-                evt_tx
-                    .send(Event::ShellOutput(
-                        String::from_utf8_lossy(&buf[..n]).into_owned(),
-                    ))
-                    .ok();
-            }
-            _ => {}
         }
 
         if idle {
