@@ -19,6 +19,8 @@ src/
   icon.rs           named glyphs from the bundled Phosphor font
   ui/
     mod.rs          root layout
+    tabs.rs         session tab strip
+    terminal.rs     interactive shell (raw keystrokes to a PTY)
     rail.rs         left icon rail
     dashboard.rs    Hosts page: search, recents, actions, grid
     host_card.rs    one host tile

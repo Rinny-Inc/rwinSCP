@@ -4,6 +4,7 @@ pub mod explorer;
 pub mod host_card;
 pub mod log_panel;
 pub mod rail;
+pub mod tabs;
 pub mod terminal;
 pub mod widgets;
 
@@ -49,7 +50,9 @@ pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 }),
         )
         .show(ui, |ui| {
-            let view = match &app.session {
+            keep(&mut action, tabs::show(app, ui));
+
+            let view = match app.session() {
                 Some(session) if session.terminal.is_some() => terminal::show(app, ui),
                 Some(_) => explorer::show(app, ui),
                 None => dashboard::show(app, ui),

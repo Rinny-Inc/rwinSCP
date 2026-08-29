@@ -10,9 +10,7 @@ const SIZE_COL: f32 = 96.0;
 const MODIFIED_COL: f32 = 148.0;
 
 pub fn show(app: &App, ui: &mut Ui) -> Option<Action> {
-    let Some(session) = &app.session else {
-        return None;
-    };
+    let session = app.session()?;
     let mut action = None;
 
     keep(&mut action, header(ui, session));
@@ -204,6 +202,7 @@ fn table(ui: &mut Ui, session: &Session) -> Option<Action> {
     }
 
     egui::ScrollArea::vertical()
+        .id_salt("file_table")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (index, entry) in session.entries.iter().enumerate() {

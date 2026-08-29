@@ -20,5 +20,8 @@ pub const ARROW_UP: &str = "\u{E08E}";
 pub const ARROW_CLOCKWISE: &str = "\u{E036}";
 pub const CARET_RIGHT: &str = "\u{E13A}";
 
+pub const TERMINAL: &str = "\u{EAE8}";
+pub const X_SMALL: &str = "\u{E4F6}";
+
 pub const FILE: &str = "\u{E230}";
 pub const FOLDER: &str = "\u{E24A}";

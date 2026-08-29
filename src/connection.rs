@@ -46,6 +46,10 @@ impl Protocol {
     pub fn is_object_store(self) -> bool {
         matches!(self, Protocol::S3)
     }
+
+    pub fn has_shell(self) -> bool {
+        matches!(self, Protocol::Ssh | Protocol::Sftp | Protocol::Scp)
+    }
 }
 
 impl fmt::Display for Protocol {
@@ -144,17 +148,39 @@ impl ConnectionProfile {
         if self.protocol == protocol {
             return;
         }
-        let had_default_port = self.port == self.protocol.default_port();
         self.protocol = protocol;
-        if had_default_port {
-            self.port = protocol.default_port();
-        }
+        self.port = protocol.default_port();
         let compatible = matches!(
             (&self.auth, protocol.is_object_store()),
             (Auth::S3Keys { .. }, true) | (Auth::Password(_) | Auth::KeyFile { .. }, false)
         );
         if !compatible {
             self.auth = Auth::for_protocol(protocol);
+        }
+    }
+
+    pub fn normalize_endpoint(&mut self) {
+        let host = self.host.trim().to_owned();
+
+        let split = if let Some(rest) = host.strip_prefix('[') {
+            rest.split_once("]:")
+                .map(|(addr, port)| (format!("[{addr}]"), port.to_owned()))
+        } else if host.matches(':').count() == 1 {
+            host.split_once(':')
+                .map(|(addr, port)| (addr.to_owned(), port.to_owned()))
+        } else {
+            None
+        };
+
+        match split {
+            Some((addr, port)) if port.parse::<u16>().is_ok_and(|p| p > 0) => {
+                self.host = addr;
+                self.port = port.parse().expect("checked above");
+            }
+            _ => {
+                self.host = host;
+                self.port = self.protocol.default_port();
+            }
         }
     }
 }

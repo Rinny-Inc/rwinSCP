@@ -96,15 +96,21 @@ fn protocol_picker(ui: &mut Ui, profile: &mut ConnectionProfile) {
 
 fn host_fields(ui: &mut Ui, profile: &mut ConnectionProfile) {
     field(ui, "Host");
-    ui.add(
-        egui::TextEdit::singleline(&mut profile.host)
-            .hint_text("example.com")
-            .desired_width(f32::INFINITY),
-    );
-    ui.end_row();
-
-    field(ui, "Port");
-    ui.add(egui::DragValue::new(&mut profile.port).range(1..=65535));
+    ui.vertical(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut profile.host)
+                .hint_text("exemple.com")
+                .desired_width(f32::INFINITY),
+        );
+        ui.label(
+            RichText::new(format!(
+                "port {} by default \u{2014} add :port to override",
+                profile.protocol.default_port()
+            ))
+            .color(theme::TEXT_FAINT)
+            .small(),
+        );
+    });
     ui.end_row();
 
     field(ui, "Username");

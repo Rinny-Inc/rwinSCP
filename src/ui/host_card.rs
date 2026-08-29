@@ -34,14 +34,18 @@ pub fn show(ui: &mut Ui, index: usize, host: &Host) -> Option<Action> {
                 {
                     action = Some(Action::EditHost(index));
                 }
-                let open_hint = if profile.protocol.browsable() {
-                    "Open explorer"
-                } else {
-                    "Open shell"
-                };
-                if widgets::ghost_button(ui, icon::ARROW_RIGHT, true)
-                    .on_hover_text(open_hint)
-                    .clicked()
+                if profile.protocol.has_shell()
+                    && widgets::ghost_button(ui, icon::TERMINAL, true)
+                        .on_hover_text("Open shell")
+                        .clicked()
+                {
+                    action = Some(Action::OpenShell(index));
+                }
+
+                if profile.protocol.browsable()
+                    && widgets::ghost_button(ui, icon::ARROW_RIGHT, true)
+                        .on_hover_text("Open explorer")
+                        .clicked()
                 {
                     action = Some(Action::Connect(index));
                 }
@@ -71,7 +75,11 @@ pub fn show(ui: &mut Ui, index: usize, host: &Host) -> Option<Action> {
     });
 
     if action.is_none() && response.clicked() {
-        action = Some(Action::Connect(index));
+        action = Some(if profile.protocol.browsable() {
+            Action::Connect(index)
+        } else {
+            Action::OpenShell(index)
+        });
     }
 
     action

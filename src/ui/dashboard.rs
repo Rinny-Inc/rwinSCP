@@ -10,6 +10,7 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let mut action = None;
 
     egui::ScrollArea::vertical()
+        .id_salt("dashboard")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let content_width = ui.available_width();

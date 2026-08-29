@@ -19,14 +19,14 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.add_space(theme::S3);
     ui.vertical_centered(|ui| {
         for (glyph, tooltip, enabled) in NAV {
-            let active = enabled && app.session.is_none();
+            let active = enabled && app.active.is_none();
             if icon(ui, glyph, active, enabled)
                 .on_hover_text(tooltip)
                 .clicked()
                 && enabled
-                && app.session.is_some()
+                && app.active.is_some()
             {
-                action = Some(Action::Disconnect);
+                action = Some(Action::SelectTab(None));
             }
             ui.add_space(theme::S1 + 2.0);
         }

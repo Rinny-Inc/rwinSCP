@@ -21,6 +21,7 @@ pub fn show(app: &App, ui: &mut Ui) -> Option<Action> {
     ui.add_space(theme::S1);
 
     egui::ScrollArea::vertical()
+        .id_salt("activity_log")
         .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
