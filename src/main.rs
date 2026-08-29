@@ -2,6 +2,7 @@ mod app;
 mod backend;
 mod connection;
 mod icon;
+mod store;
 mod theme;
 mod ui;
 
@@ -19,7 +20,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::install(&cc.egui_ctx);
-            Ok(Box::new(app::App::default()))
+            Ok(Box::new(app::App::load()))
         }),
     )
 }

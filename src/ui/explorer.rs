@@ -9,13 +9,20 @@ const ROW_HEIGHT: f32 = 26.0;
 const SIZE_COL: f32 = 96.0;
 const MODIFIED_COL: f32 = 148.0;
 
-pub fn show(app: &App, ui: &mut Ui) -> Option<Action> {
-    let session = app.session()?;
+pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let mut action = None;
 
-    keep(&mut action, header(ui, session));
+    keep(&mut action, header(ui, app.session()?));
     ui.add_space(theme::S3);
-    keep(&mut action, breadcrumbs(ui, &session.cwd));
+    {
+        let session = app.session_mut()?;
+        let cwd = session.cwd.clone();
+        keep(
+            &mut action,
+            breadcrumbs(ui, &cwd, session.path_edit.as_mut()),
+        );
+    }
+    let session = app.session()?;
     ui.add_space(theme::S2);
     keep(&mut action, toolbar(ui, session));
 
@@ -77,8 +84,44 @@ fn header(ui: &mut Ui, session: &Session) -> Option<Action> {
     action
 }
 
-fn breadcrumbs(ui: &mut Ui, cwd: &str) -> Option<Action> {
+fn breadcrumbs(ui: &mut Ui, cwd: &str, editing: Option<&mut String>) -> Option<Action> {
     let mut action = None;
+
+    if let Some(buffer) = editing {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icon::FOLDER).color(theme::ACCENT));
+
+            let field = ui.add(
+                egui::TextEdit::singleline(buffer)
+                    .id_salt("path_bar")
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("/path/to/somewhere")
+                    .desired_width(ui.available_width() - 90.0),
+            );
+
+            if !field.has_focus() {
+                field.request_focus();
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field.id) {
+                    let all = egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(buffer.chars().count()),
+                    );
+                    state.cursor.set_char_range(Some(all));
+                    state.store(ui.ctx(), field.id);
+                }
+            }
+
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if enter && (field.has_focus() || field.lost_focus()) {
+                action = Some(Action::CommitPath);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                action = Some(Action::CancelPath);
+            }
+        });
+
+        return action;
+    }
 
     ui.horizontal_wrapped(|ui| {
         if widgets::ghost_button(ui, "/", true)
@@ -102,6 +145,14 @@ fn breadcrumbs(ui: &mut Ui, cwd: &str) -> Option<Action> {
             } else if widgets::ghost_button(ui, segment, true).clicked() {
                 action = Some(Action::Navigate(path.clone()));
             }
+        }
+
+        ui.add_space(theme::S2);
+        if widgets::ghost_button(ui, icon::PENCIL, true)
+            .on_hover_text("Type a path")
+            .clicked()
+        {
+            action = Some(Action::EditPath);
         }
     });
 

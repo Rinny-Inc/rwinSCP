@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::backend::{self, Command, Event, RemoteEntry, WorkerHandle};
-use crate::connection::{ConnectionProfile, Protocol};
+use crate::connection::{Auth, ConnectionProfile, Protocol};
 use crate::ui;
 
 pub struct Host {
+    pub id: String,
     pub profile: ConnectionProfile,
     pub last_used: Option<Instant>,
 }
@@ -54,6 +55,7 @@ pub struct Session {
     pub transfer: Option<Transfer>,
     pub loading: bool,
     pub terminal: Option<Terminal>,
+    pub path_edit: Option<String>,
 }
 
 impl Session {
@@ -120,6 +122,9 @@ pub enum Action {
     Disconnect,
     Navigate(String),
     Refresh,
+    EditPath,
+    CommitPath,
+    CancelPath,
     ShellBytes(String),
     Download,
     Upload,
@@ -169,6 +174,40 @@ impl Default for App {
 const LOG_CAPACITY: usize = 500;
 
 impl App {
+    pub fn load() -> Self {
+        let hosts = crate::store::load();
+        let restored = hosts.len();
+        let mut app = Self {
+            hosts,
+            ..Self::default()
+        };
+        if restored > 0 {
+            app.info(format!(
+                "Restored {restored} host{}",
+                if restored == 1 { "" } else { "s" }
+            ));
+        }
+        app
+    }
+
+    fn persist(&mut self) {
+        if let Err(e) = crate::store::save(&self.hosts) {
+            self.error(format!("Could not save hosts: {e}"));
+            return;
+        }
+
+        let unsaved: Vec<String> = self
+            .hosts
+            .iter()
+            .filter(|host| !crate::store::save_secret(host))
+            .map(|host| host.profile.display_name().to_owned())
+            .collect();
+
+        if !unsaved.is_empty() {
+            self.error(format!("Hosts saved, but the keychain refused credentials for {}; you will be asked for them again", unsaved.join(", ")));
+        }
+    }
+
     pub fn session(&self) -> Option<&Session> {
         self.active.and_then(|i| self.sessions.get(i))
     }
@@ -253,6 +292,8 @@ impl App {
                 if index < self.hosts.len() {
                     let host = self.hosts.remove(index);
                     self.info(format!("Removed {}", host.profile.display_name()));
+                    crate::store::forget_secret(&host.id);
+                    self.persist();
                     if let Some((_, Some(editing))) = &mut self.draft {
                         if *editing == index {
                             self.draft = None;
@@ -266,11 +307,14 @@ impl App {
             Action::CancelEdit => self.draft = None,
 
             Action::SaveDraft => {
-                self.commit_draft();
+                if self.commit_draft().is_some() {
+                    self.persist();
+                }
             }
 
             Action::SaveDraftAndConnect => {
                 if let Some(index) = self.commit_draft() {
+                    self.persist();
                     self.connect(index, None);
                 }
             }
@@ -299,6 +343,26 @@ impl App {
                     && session.terminal.is_some()
                 {
                     session.worker.send(Command::ShellInput(bytes));
+                }
+            }
+
+            Action::EditPath => {
+                if let Some(session) = self.session_mut() {
+                    session.path_edit = Some(session.cwd.clone());
+                }
+            }
+            Action::CommitPath => {
+                if let Some(session) = self.session_mut()
+                    && let Some(typed) = session.path_edit.take()
+                {
+                    let target = typed.trim();
+                    let target = if target.is_empty() { "/" } else { target };
+                    session.navigate(target.to_owned());
+                }
+            }
+            Action::CancelPath => {
+                if let Some(session) = self.session_mut() {
+                    session.path_edit = None;
                 }
             }
 
@@ -357,11 +421,20 @@ impl App {
             }
             _ => {
                 self.hosts.push(Host {
+                    id: crate::store::new_id(),
                     profile,
                     last_used: None,
                 });
                 Some(self.hosts.len() - 1)
             }
+        }
+    }
+
+    fn missing_secret(profile: &ConnectionProfile) -> bool {
+        match &profile.auth {
+            Auth::Password(pswrd) => pswrd.is_empty(),
+            Auth::KeyFile { path, .. } => path.is_empty(),
+            Auth::S3Keys { secret_key, .. } => secret_key.is_empty(),
         }
     }
 
@@ -375,6 +448,15 @@ impl App {
 
         if let Some(existing) = self.sessions.iter().position(|s| s.key == key) {
             self.active = Some(existing);
+            return;
+        }
+        let Some(host) = self.hosts.get(index) else {
+            return;
+        };
+        if Self::missing_secret(&host.profile) {
+            let name = host.profile.display_name().to_owned();
+            self.error(format!("No stored credentials for {name} -- open its Edit form and enter them again. \
+                                     (Saved hosts keep secrets in the OS keychain, which can refuse to forget them.)"));
             return;
         }
         let Some(host) = self.hosts.get_mut(index) else {
@@ -404,6 +486,7 @@ impl App {
             terminal: is_shell.then(|| Terminal {
                 output: String::new(),
             }),
+            path_edit: None,
         });
         self.active = Some(self.sessions.len() - 1);
     }
@@ -508,6 +591,7 @@ impl App {
                         });
                         session.cwd = path;
                         session.entries = entries;
+                        session.path_edit = None;
                         session.selection.clear();
                         session.anchor = None;
                         session.loading = false;
