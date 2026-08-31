@@ -1,3 +1,5 @@
+use std::thread::scope;
+
 use egui::{Align2, CornerRadius, FontId, RichText, Sense, Ui, Vec2};
 
 use crate::app::{Action, App, Session, Status, human_size, parent_path};
@@ -46,6 +48,25 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
 
     ui.add_space(theme::S3);
     keep(&mut action, table(ui, session));
+
+    let hovering = ui.ctx().input(|i| i.raw.hovered_files.len());
+    if hovering > 0 {
+        let screen = ui
+            .ctx()
+            .input(|i| i.raw.screen_rect.unwrap_or(ui.max_rect()));
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("drop_overlay"),
+        ));
+        painter.rect_filled(screen, 0, theme::tint(theme::ACCENT, 26));
+        painter.text(
+            screen.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("Drop {hovering} item(s) into {}", session.cwd),
+            egui::FontId::proportional(18.0),
+            theme::TEXT,
+        );
+    }
 
     action
 }
@@ -162,7 +183,7 @@ fn breadcrumbs(ui: &mut Ui, cwd: &str, editing: Option<&mut String>) -> Option<A
 fn toolbar(ui: &mut Ui, session: &Session) -> Option<Action> {
     let mut action = None;
     let selected = session.selection.len();
-    let single_file = session.sole_selection().is_some_and(|entry| !entry.is_dir);
+    let selected_count = session.selection.len();
 
     ui.horizontal(|ui| {
         if ui
@@ -177,11 +198,16 @@ fn toolbar(ui: &mut Ui, session: &Session) -> Option<Action> {
 
         widgets::divider_spacer(ui);
 
+        let download_label = if selected_count > 1 {
+            format!("{} Download ({selected_count})", icon::DOWNLOAD)
+        } else {
+            format!("{} Download", icon::DOWNLOAD)
+        };
+
         if ui
             .add_enabled(
-                single_file,
-                egui::Button::new(format!("{} Download", icon::DOWNLOAD))
-                    .corner_radius(theme::R_SM),
+                selected_count > 0,
+                egui::Button::new(download_label).corner_radius(theme::R_SM),
             )
             .clicked()
         {
@@ -189,13 +215,24 @@ fn toolbar(ui: &mut Ui, session: &Session) -> Option<Action> {
         }
         if ui
             .add(egui::Button::new(format!("{} Upload", icon::UPLOAD)).corner_radius(theme::R_SM))
+            .on_hover_text("Upload files (or drop them on the window)")
             .clicked()
         {
             action = Some(Action::Upload);
         }
         if ui
             .add(
-                egui::Button::new(format!("{} Folder", icon::FOLDER_PLUS))
+                egui::Button::new(format!("{} Upload folder", icon::UPLOAD))
+                    .corner_radius(theme::R_SM),
+            )
+            .on_hover_text("Upload whole folders, contents & all")
+            .clicked()
+        {
+            action = Some(Action::UploadFolder);
+        }
+        if ui
+            .add(
+                egui::Button::new(format!("{} New folder", icon::FOLDER_PLUS))
                     .corner_radius(theme::R_SM),
             )
             .clicked()

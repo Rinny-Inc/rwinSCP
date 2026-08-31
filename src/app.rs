@@ -17,6 +17,36 @@ pub enum Status {
     Connected,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub enum Direction {
+    Upload,
+    Download,
+}
+impl Direction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Direction::Upload => "up",
+            Direction::Download => "down",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum TransferState {
+    Running,
+    Done,
+    Failed,
+}
+
+pub struct TransferRecord {
+    pub label: String,
+    pub host: String,
+    pub direction: Direction,
+    pub bytes: u64,
+    pub state: TransferState,
+    pub at: Instant,
+}
+
 pub struct Transfer {
     pub label: String,
     pub transferred: u64,
@@ -56,6 +86,7 @@ pub struct Session {
     pub loading: bool,
     pub terminal: Option<Terminal>,
     pub path_edit: Option<String>,
+    pub batch_bytes: std::collections::HashMap<String, u64>,
 }
 
 impl Session {
@@ -65,14 +96,6 @@ impl Session {
             .enumerate()
             .filter(|(i, _)| self.selection.contains(i))
             .map(|(_, entry)| entry)
-    }
-
-    pub fn sole_selection(&self) -> Option<&RemoteEntry> {
-        let mut it = self.selected_entries();
-        match (it.next(), it.next()) {
-            (Some(entry), None) => Some(entry),
-            _ => None,
-        }
     }
 
     pub fn click_row(&mut self, index: usize, modifiers: egui::Modifiers) {
@@ -128,6 +151,10 @@ pub enum Action {
     ShellBytes(String),
     Download,
     Upload,
+    UploadFolder,
+    DroppedFiles(Vec<std::path::PathBuf>),
+    ToggleHistory,
+    ClearHistory,
     Mkdir,
     DeleteSelected,
     ClickRow(usize, egui::Modifiers),
@@ -154,6 +181,8 @@ pub struct App {
     pub sessions: Vec<Session>,
     pub active: Option<usize>,
     pub log: Vec<LogLine>,
+    pub history: Vec<TransferRecord>,
+    pub show_history: bool,
     pub show_log: bool,
 }
 
@@ -166,12 +195,15 @@ impl Default for App {
             sessions: Vec::new(),
             active: None,
             log: Vec::new(),
+            history: Vec::new(),
+            show_history: false,
             show_log: true,
         }
     }
 }
 
 const LOG_CAPACITY: usize = 500;
+pub const HISTORY_CAPACITY: usize = 75;
 
 impl App {
     pub fn load() -> Self {
@@ -242,6 +274,37 @@ impl App {
 
     pub fn error(&mut self, text: impl Into<String>) {
         self.push_log(text, LogLevel::Error);
+    }
+
+    fn begin_transfer(&mut self, label: String, host: String, direction: Direction) {
+        self.history.push(TransferRecord {
+            label,
+            host,
+            direction,
+            bytes: 0,
+            state: TransferState::Running,
+            at: Instant::now(),
+        });
+        if self.history.len() > HISTORY_CAPACITY {
+            let excess = self.history.iter().len() - HISTORY_CAPACITY;
+            self.history.drain(..excess);
+        }
+    }
+
+    fn finish_transfer(&mut self, label: &str, state: TransferState, bytes: u64) {
+        let Some(record) = self
+            .history
+            .iter_mut()
+            .rev()
+            .find(|r| r.label == label && r.state == TransferState::Running)
+        else {
+            return;
+        };
+
+        record.state = state;
+        if bytes > 0 {
+            record.bytes = bytes;
+        }
     }
 
     fn push_log(&mut self, text: impl Into<String>, level: LogLevel) {
@@ -389,7 +452,11 @@ impl App {
             }
 
             Action::Download => self.download_selection(),
-            Action::Upload => self.upload_file(),
+            Action::Upload => self.upload_files(false),
+            Action::UploadFolder => self.upload_files(true),
+            Action::DroppedFiles(paths) => self.upload_paths(paths),
+            Action::ToggleHistory => self.show_history = !self.show_history,
+            Action::ClearHistory => self.history.clear(),
 
             Action::Mkdir => {
                 if let Some(session) = self.session_mut() {
@@ -487,6 +554,7 @@ impl App {
                 output: String::new(),
             }),
             path_edit: None,
+            batch_bytes: std::collections::HashMap::new(),
         });
         self.active = Some(self.sessions.len() - 1);
     }
@@ -495,45 +563,74 @@ impl App {
         let Some(session) = self.session() else {
             return;
         };
-        let Some(entry) = session.sole_selection() else {
-            return;
-        };
-        if entry.is_dir {
-            self.error("Directory download is not supported yet");
+        let targets: Vec<(String, String)> = session
+            .selected_entries()
+            .map(|entry| (join_path(&session.cwd, &entry.name), entry.name.clone()))
+            .collect();
+
+        if targets.is_empty() {
             return;
         }
 
-        let remote_path = join_path(&session.cwd, &entry.name);
-        let Some(local_path) = rfd::FileDialog::new()
-            .set_file_name(&entry.name)
-            .save_file()
-        else {
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
 
-        session.worker.send(Command::Download {
-            remote_path,
-            local_path,
-        });
+        let host = session.profile.display_name().to_owned();
+        for (remote_path, name) in targets {
+            let local_path = dir.join(&name);
+            if let Some(session) = self.session() {
+                session.worker.send(Command::Download {
+                    remote_path: remote_path.clone(),
+                    local_path,
+                });
+            }
+            self.begin_transfer(remote_path, host.clone(), Direction::Download);
+        }
     }
 
-    fn upload_file(&mut self) {
+    fn upload_files(&mut self, folder: bool) {
+        let dialog = rfd::FileDialog::new();
+        let picked = if folder {
+            dialog.pick_folders().unwrap_or_default()
+        } else {
+            dialog.pick_files().unwrap_or_default()
+        };
+
+        self.upload_paths(picked);
+    }
+
+    pub fn upload_paths(&mut self, paths: Vec<std::path::PathBuf>) {
         let Some(session) = self.session() else {
             return;
         };
-        let Some(local_path) = rfd::FileDialog::new().pick_file() else {
-            return;
-        };
-        let Some(name) = local_path.file_name().and_then(|n| n.to_str()) else {
-            self.error("That filename is not valid UTF-8");
-            return;
-        };
+        let cwd = session.cwd.clone();
+        let host = session.profile.display_name().to_owned();
 
-        let remote_path = join_path(&session.cwd, name);
-        session.worker.send(Command::Upload {
-            local_path,
-            remote_path,
-        });
+        let mut skipped = 0;
+        let mut queued = Vec::new();
+        for local_path in paths {
+            match local_path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => queued.push((local_path.clone(), join_path(&cwd, name))),
+                None => skipped += 1,
+            }
+        }
+
+        if skipped > 0 {
+            self.error(format!(
+                "Skipped {skipped} item(s) whose names are not valid UTF-8"
+            ));
+        }
+
+        for (local_path, remote_path) in queued {
+            if let Some(session) = self.session() {
+                session.worker.send(Command::Upload {
+                    local_path,
+                    remote_path: remote_path.clone(),
+                });
+            }
+            self.begin_transfer(remote_path, host.clone(), Direction::Upload);
+        }
     }
 
     fn delete_selection(&mut self) {
@@ -556,6 +653,7 @@ impl App {
 
     fn poll_worker(&mut self, ctx: &egui::Context) {
         let mut logs: Vec<(String, LogLevel)> = Vec::new();
+        let mut finished: Vec<(String, TransferState, u64)> = Vec::new();
         let mut closed: Vec<usize> = Vec::new();
         let mut busy = false;
 
@@ -602,6 +700,7 @@ impl App {
                         total,
                         label,
                     } => {
+                        session.batch_bytes.insert(label.clone(), transferred);
                         session.transfer = Some(Transfer {
                             label,
                             transferred,
@@ -610,6 +709,17 @@ impl App {
                     }
 
                     Event::TransferDone { label } => {
+                        let prefix = format!("{label}/");
+                        let moved: u64 = session
+                            .batch_bytes
+                            .iter()
+                            .filter(|(k, _)| *k == &label || k.starts_with(&prefix))
+                            .map(|(_, v)| *v)
+                            .sum();
+                        session
+                            .batch_bytes
+                            .retain(|k, _| k != &label && !k.starts_with(&prefix));
+                        finished.push((label.clone(), TransferState::Done, moved));
                         session.transfer = None;
                         logs.push((format!("Finished {label}"), LogLevel::Success));
                         session.refresh();
@@ -627,6 +737,13 @@ impl App {
                     }
 
                     Event::Error(message) => {
+                        if let Some(active) = session.transfer.as_ref() {
+                            finished.push((
+                                active.label.clone(),
+                                TransferState::Failed,
+                                active.transferred,
+                            ));
+                        }
                         session.loading = false;
                         logs.push((message, LogLevel::Error));
                     }
@@ -643,6 +760,9 @@ impl App {
 
         for (text, level) in logs {
             self.push_log(text, level);
+        }
+        for (label, state, bytes) in finished {
+            self.finish_transfer(&label, state, bytes);
         }
 
         closed.sort_unstable();

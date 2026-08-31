@@ -210,6 +210,45 @@ fn handle(
         Command::Download {
             remote_path,
             local_path,
+        } if profile.protocol == Protocol::Sftp => {
+            let sftp = need_sftp()?;
+            let stat = sftp.stat(Path::new(remote_path))?;
+            if stat.is_dir() {
+                download_dir(sftp, remote_path, local_path, evt_tx)?;
+            } else {
+                let mut local = File::create(local_path)?;
+                let mut remote = sftp.open(Path::new(remote_path))?;
+                let total = remote.stat()?.size.unwrap_or(0);
+                pump(&mut remote, &mut local, total, remote_path, evt_tx)?;
+            }
+            evt_tx
+                .send(Event::TransferDone {
+                    label: remote_path.clone(),
+                })
+                .ok();
+        }
+        Command::Upload {
+            local_path,
+            remote_path,
+        } if profile.protocol == Protocol::Sftp => {
+            let sftp = need_sftp()?;
+            if local_path.is_dir() {
+                upload_dir(sftp, local_path, remote_path, evt_tx)?;
+            } else {
+                let mut local = File::open(local_path)?;
+                let total = local.metadata()?.len();
+                let mut remote = sftp.create(Path::new(remote_path))?;
+                pump(&mut local, &mut remote, total, remote_path, evt_tx)?;
+            }
+            evt_tx
+                .send(Event::TransferDone {
+                    label: remote_path.clone(),
+                })
+                .ok();
+        }
+        Command::Download {
+            remote_path,
+            local_path,
         } => {
             let mut local = File::create(local_path)?;
             match profile.protocol {
@@ -295,6 +334,68 @@ fn handle(
 
         Command::Disconnect => {}
     }
+    Ok(())
+}
+
+fn upload_dir(
+    sftp: &ssh2::Sftp,
+    local_dir: &std::path::Path,
+    remote_dir: &str,
+    evt_tx: &Sender<Event>,
+) -> anyhow::Result<()> {
+    sftp.mkdir(Path::new(remote_dir), 0o755).ok();
+
+    for entry in std::fs::read_dir(local_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue; // skip name that cannot be represented remotely
+        };
+        let remote_child = format!("{}/{name}", remote_dir.trim_end_matches('/'));
+        let local_child = entry.path();
+
+        if entry.file_type()?.is_dir() {
+            upload_dir(sftp, &local_child, &remote_child, evt_tx)?;
+        } else {
+            let mut local = File::open(&local_child)?;
+            let total = local.metadata()?.len();
+            let mut remote = sftp.create(Path::new(&remote_child))?;
+            pump(&mut local, &mut remote, total, &remote_child, evt_tx)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn download_dir(
+    sftp: &ssh2::Sftp,
+    remote_dir: &str,
+    local_dir: &std::path::Path,
+    evt_tx: &Sender<Event>,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(local_dir)?;
+
+    for (path, stat) in sftp.readdir(Path::new(remote_dir))? {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
+
+        let remote_child = format!("{}/{name}", remote_dir.trim_end_matches('/'));
+        let local_child = local_dir.join(name);
+
+        if stat.is_dir() {
+            download_dir(sftp, &remote_child, &local_child, evt_tx)?;
+        } else {
+            let mut local = File::create(&local_child)?;
+            let mut remote = sftp.open(Path::new(&remote_child))?;
+            let total = stat.size.unwrap_or(0);
+            pump(&mut remote, &mut local, total, &remote_child, evt_tx)?;
+        }
+    }
+
     Ok(())
 }
 

@@ -8,7 +8,7 @@ const NAV: [(&str, &str, bool); 4] = [
     (icon::DESKTOP, "Hosts", true),
     (icon::CODE, "Snippets", false),
     (icon::ARROWS_LEFT_RIGHT, "Tunnels", false),
-    (icon::CLOCK_HISTORY, "History", false),
+    (icon::CLOCK_HISTORY, "History", true),
 ];
 
 const FOOTER: [(&str, &str); 2] = [(icon::GEAR, "Settings"), (icon::LIST, "Activity log")];
@@ -19,14 +19,23 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.add_space(theme::S3);
     ui.vertical_centered(|ui| {
         for (glyph, tooltip, enabled) in NAV {
-            let active = enabled && app.active.is_none();
-            if icon(ui, glyph, active, enabled)
+            let active = match tooltip {
+                "Hosts" => app.active.is_none(),
+                "History" => app.show_history,
+                _ => false,
+            };
+            let clicked = icon(ui, glyph, active, enabled)
                 .on_hover_text(tooltip)
-                .clicked()
-                && enabled
-                && app.active.is_some()
-            {
-                action = Some(Action::SelectTab(None));
+                .clicked();
+
+            if clicked && enabled {
+                match tooltip {
+                    "Hosts" if app.active.is_some() => {
+                        action = Some(Action::SelectTab(None));
+                    }
+                    "History" => action = Some(Action::ToggleHistory),
+                    _ => {}
+                }
             }
             ui.add_space(theme::S1 + 2.0);
         }

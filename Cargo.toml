@@ -7,7 +7,7 @@ edition = "2024"
 eframe = "0.36.1"
 egui = "0.36.1"
 ssh2 = "0.9.6"
-suppaftp = "10.0.1"
+suppaftp = "11.0.0"
 anyhow = "1.0.104"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
 aws-config = "1.11.0"

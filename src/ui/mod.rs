@@ -1,6 +1,7 @@
 pub mod dashboard;
 pub mod editor;
 pub mod explorer;
+pub mod history;
 pub mod host_card;
 pub mod log_panel;
 pub mod rail;
@@ -59,6 +60,19 @@ pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
             };
             keep(&mut action, view);
         });
+
+    keep(&mut action, history::show(app, ui.ctx()));
+
+    let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
+        i.raw
+            .dropped_files
+            .iter()
+            .map(|f| f.path().to_path_buf())
+            .collect()
+    });
+    if !dropped.is_empty() && app.session().is_some_and(|s| s.terminal.is_none()) {
+        keep(&mut action, Some(Action::DroppedFiles(dropped)));
+    }
 
     action
 }
