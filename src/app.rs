@@ -80,6 +80,13 @@ impl TransferRecord {
     }
 }
 
+pub struct PendingHostKey {
+    pub session: usize,
+    pub host: String,
+    pub fingerprint: String,
+    pub key_type: String,
+}
+
 pub struct PendingTransfer {
     profile: ConnectionProfile,
     command: Command,
@@ -179,6 +186,8 @@ pub enum Action {
     Download,
     Upload,
     UploadFolder,
+    TrustHostKey,
+    RejectHostKey,
     DroppedFiles(Vec<std::path::PathBuf>),
     ToggleHistory,
     ClearHistory,
@@ -211,6 +220,7 @@ pub struct App {
     pub history: Vec<TransferRecord>,
     jobs: Vec<TransferJob>,
     queue: std::collections::VecDeque<PendingTransfer>,
+    pub pending_host_key: Option<PendingHostKey>,
     pub show_history: bool,
     pub show_log: bool,
 }
@@ -227,6 +237,7 @@ impl Default for App {
             history: Vec::new(),
             jobs: Vec::new(),
             queue: std::collections::VecDeque::new(),
+            pending_host_key: None,
             show_history: false,
             show_log: true,
         }
@@ -597,6 +608,23 @@ impl App {
             Action::ToggleHistory => self.show_history = !self.show_history,
             Action::ClearHistory => self.history.clear(),
 
+            Action::TrustHostKey => {
+                if let Some(pending) = self.pending_host_key.take()
+                    && let Some(session) = self.sessions.get(pending.session)
+                {
+                    session.worker.send(Command::TrustHostKey);
+                    self.info(format!("Trusted the host key for {}", pending.host));
+                }
+            }
+            Action::RejectHostKey => {
+                if let Some(pending) = self.pending_host_key.take() {
+                    self.error(format!("Refused the host key for {}", pending.host));
+                    if pending.session < self.sessions.len() {
+                        self.close_session(pending.session);
+                    }
+                }
+            }
+
             Action::Mkdir => {
                 if let Some(session) = self.session_mut() {
                     let path = join_path(&session.cwd, "new-folder");
@@ -793,6 +821,7 @@ impl App {
     fn poll_worker(&mut self, ctx: &egui::Context) {
         let mut logs: Vec<(String, LogLevel)> = Vec::new();
         let mut closed: Vec<usize> = Vec::new();
+        let mut prompts: Vec<PendingHostKey> = Vec::new();
         let mut busy = false;
 
         for (index, session) in self.sessions.iter_mut().enumerate() {
@@ -812,6 +841,19 @@ impl App {
                         } else {
                             session.loading = false;
                         }
+                    }
+
+                    Event::HostKeyUnknown {
+                        host,
+                        fingerprint,
+                        key_type,
+                    } => {
+                        prompts.push(PendingHostKey {
+                            session: index,
+                            host,
+                            fingerprint,
+                            key_type,
+                        });
                     }
 
                     Event::ConnectFailed(message) => {
@@ -864,6 +906,11 @@ impl App {
 
         for (text, level) in logs {
             self.push_log(text, level);
+        }
+        if self.pending_host_key.is_none()
+            && let Some(prompt) = prompts.into_iter().next()
+        {
+            self.pending_host_key = Some(prompt);
         }
 
         closed.sort_unstable();

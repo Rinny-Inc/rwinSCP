@@ -20,7 +20,7 @@ const PTY_COLS: u32 = 120;
 const PTY_ROWS: u32 = 34;
 
 pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
-    let session = match connect(&profile) {
+    let session = match connect(&profile, &cmd_rx, &evt_tx) {
         Ok(session) => session,
         Err(e) => {
             evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
@@ -57,7 +57,11 @@ pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender
     evt_tx.send(Event::Disconnected).ok();
 }
 
-fn connect(profile: &ConnectionProfile) -> anyhow::Result<Session> {
+fn connect(
+    profile: &ConnectionProfile,
+    cmd_rx: &Receiver<Command>,
+    evt_tx: &Sender<Event>,
+) -> anyhow::Result<Session> {
     let address = format!("{}:{}", profile.host, profile.port);
     let socket_addr = std::net::ToSocketAddrs::to_socket_addrs(&address)?
         .next()
@@ -69,6 +73,8 @@ fn connect(profile: &ConnectionProfile) -> anyhow::Result<Session> {
     let mut session = Session::new()?;
     session.set_tcp_stream(tcp);
     session.handshake()?;
+
+    verify_host_key(&session, profile, cmd_rx, evt_tx)?;
 
     match &profile.auth {
         Auth::Password(password) => {
@@ -332,6 +338,7 @@ fn handle(
             anyhow::bail!("the interactive shell is only available over SSH")
         }
 
+        Command::TrustHostKey => {}
         Command::Disconnect => {}
     }
     Ok(())
@@ -427,6 +434,121 @@ fn pump<R: Read, W: Write>(
 
     dst.flush()?;
     Ok(())
+}
+
+fn verify_host_key(
+    session: &Session,
+    profile: &ConnectionProfile,
+    cmd_rx: &Receiver<Command>,
+    evt_tx: &Sender<Event>,
+) -> anyhow::Result<()> {
+    let (key, key_type) = session
+        .host_key()
+        .ok_or_else(|| anyhow::anyhow!("server presented no host key"))?;
+
+    let mut known = session.known_hosts()?;
+    let path = known_host_path()
+        .ok_or_else(|| anyhow::anyhow!("cannot locate a home directory for known_hosts"))?;
+    if path.exists() {
+        known.read_file(&path, ssh2::KnownHostFileKind::OpenSSH)?;
+    }
+
+    match known.check_port(&profile.host, profile.port, key) {
+        ssh2::CheckResult::Match => Ok(()),
+
+        ssh2::CheckResult::Mismatch => anyhow::bail!(
+            "HOST KEY CHANGED FOR {}:{}. The server is not the one previously trusted! \
+            If you did not just rebuild it, someone may be intercepting the connection! \
+            Remove the old entry from ~/.ssh/known_hosts only if you are certain!",
+            profile.host,
+            profile.port
+        ),
+
+        ssh2::CheckResult::Failure => anyhow::bail!("could not check the host key"),
+
+        ssh2::CheckResult::NotFound => {
+            evt_tx
+                .send(Event::HostKeyUnknown {
+                    host: format!("{}:{}", profile.host, profile.port),
+                    fingerprint: fingerprint(session),
+                    key_type: describe_key_type(key_type),
+                })
+                .ok();
+
+            match cmd_rx.recv() {
+                Ok(Command::TrustHostKey) => {}
+                _ => anyhow::bail!("host key was not trusted"),
+            }
+
+            let entry = if profile.port == 22 {
+                profile.host.clone()
+            } else {
+                format!("[{}]:{}", profile.host, profile.port)
+            };
+            known.add(&entry, key, "added by rwinSCP", key_format(key_type))?;
+
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            known.write_file(&path, ssh2::KnownHostFileKind::OpenSSH)?;
+            Ok(())
+        }
+    }
+}
+
+fn fingerprint(session: &Session) -> String {
+    match session.host_key_hash(ssh2::HashType::Sha256) {
+        Some(hash) => format!("SHA256:{}", base64_no_pad(hash)),
+        None => "unavailable".to_owned(),
+    }
+}
+
+fn describe_key_type(key_type: ssh2::HostKeyType) -> String {
+    match key_type {
+        ssh2::HostKeyType::Rsa => "ssh-rsa",
+        ssh2::HostKeyType::Dss => "ssh-dss",
+        ssh2::HostKeyType::Ecdsa256 => "ecdsa-sha2-nistp256",
+        ssh2::HostKeyType::Ecdsa384 => "ecdsa-sha2-nistp384",
+        ssh2::HostKeyType::Ecdsa521 => "ecdsa-sha2-nistp521",
+        ssh2::HostKeyType::Ed25519 => "ssh-ed25519",
+        ssh2::HostKeyType::Unknown => "unknown",
+    }
+    .to_owned()
+}
+
+fn key_format(key_type: ssh2::HostKeyType) -> ssh2::KnownHostKeyFormat {
+    match key_type {
+        ssh2::HostKeyType::Rsa => ssh2::KnownHostKeyFormat::SshRsa,
+        ssh2::HostKeyType::Dss => ssh2::KnownHostKeyFormat::SshDss,
+        ssh2::HostKeyType::Ecdsa256 => ssh2::KnownHostKeyFormat::Ecdsa256,
+        ssh2::HostKeyType::Ecdsa384 => ssh2::KnownHostKeyFormat::Ecdsa384,
+        ssh2::HostKeyType::Ecdsa521 => ssh2::KnownHostKeyFormat::Ecdsa521,
+        ssh2::HostKeyType::Ed25519 => ssh2::KnownHostKeyFormat::Ed25519,
+        ssh2::HostKeyType::Unknown => ssh2::KnownHostKeyFormat::Unknown,
+    }
+}
+
+fn base64_no_pad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        let indices = [n >> 18 & 63, n >> 12 & 63, n >> 6 & 63, n & 63];
+        for index in indices.iter().take(chunk.len() + 1) {
+            out.push(ALPHABET[*index as usize] as char);
+        }
+    }
+    out
+}
+
+fn known_host_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(".ssh").join("known_hosts"))
 }
 
 fn format_unix_time(secs: u64) -> String {

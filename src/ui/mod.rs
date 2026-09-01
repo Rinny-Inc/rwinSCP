@@ -3,6 +3,7 @@ pub mod editor;
 pub mod explorer;
 pub mod history;
 pub mod host_card;
+pub mod host_key;
 pub mod log_panel;
 pub mod rail;
 pub mod tabs;
@@ -62,6 +63,7 @@ pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
         });
 
     keep(&mut action, history::show(app, ui.ctx()));
+    keep(&mut action, host_key::show(app, ui.ctx()));
 
     let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
         i.raw

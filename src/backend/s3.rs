@@ -271,6 +271,7 @@ async fn handle(
 
         Command::Exec { .. } => anyhow::bail!("S3 has no remote shell"),
 
+        Command::TrustHostKey => {}
         Command::Disconnect => {}
     }
     Ok(())

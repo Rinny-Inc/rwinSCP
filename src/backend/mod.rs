@@ -46,6 +46,7 @@ pub enum Command {
     },
     /// SSH only: raw bytes typed into interactive shell
     ShellInput(String),
+    TrustHostKey,
     Disconnect,
 }
 
@@ -54,6 +55,11 @@ pub enum Command {
 pub enum Event {
     Connected,
     ConnectFailed(String),
+    HostKeyUnknown {
+        host: String,
+        fingerprint: String,
+        key_type: String,
+    },
     Listing {
         path: String,
         entries: Vec<RemoteEntry>,

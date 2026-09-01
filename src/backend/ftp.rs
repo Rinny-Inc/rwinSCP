@@ -108,6 +108,7 @@ fn handle(ftp: &mut FtpStream, cmd: &Command, evt_tx: &Sender<Event>) -> anyhow:
 
         Command::Exec { .. } => anyhow::bail!("FTP has no remote shell"),
 
+        Command::TrustHostKey => {}
         Command::Disconnect => {}
     }
     Ok(())
