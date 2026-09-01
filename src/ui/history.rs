@@ -1,7 +1,8 @@
 use egui::{RichText, Ui};
 
 use crate::app::{
-    Action, App, Direction, HISTORY_CAPACITY, TransferState, human_size, relative_time,
+    Action, App, Direction, HISTORY_CAPACITY, TransferRecord, TransferState, human_size,
+    relative_time,
 };
 use crate::icon;
 use crate::theme;
@@ -57,44 +58,87 @@ fn body(app: &App, ui: &mut Ui, action: &mut Option<Action>) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for record in app.history.iter().rev() {
-                ui.horizontal(|ui| {
-                    let (glyph, tint) = match record.direction {
-                        Direction::Upload => (icon::UPLOAD, theme::ACCENT),
-                        Direction::Download => (icon::DOWNLOAD, theme::OK),
-                    };
-                    ui.label(RichText::new(glyph).color(tint));
-
-                    let (status, color) = match record.state {
-                        TransferState::Running => ("running", theme::PENDING),
-                        TransferState::Done => ("done", theme::OK),
-                        TransferState::Failed => ("failed", theme::DANGER),
-                    };
-
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new(&record.label)
-                                .color(theme::TEXT)
-                                .monospace()
-                                .small(),
-                        );
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {} · {} · {}",
-                                record.host,
-                                record.direction.clone().label(),
-                                human_size(record.bytes),
-                                relative_time(record.at)
-                            ))
-                            .color(theme::TEXT_FAINT)
-                            .small(),
-                        );
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(status).color(color).small());
-                        });
-                    });
-                    ui.add_space(theme::S1);
-                });
+                row(ui, record);
+                ui.add_space(theme::S2);
             }
         });
+}
+
+fn row(ui: &mut Ui, record: &TransferRecord) {
+    let (glyph, tint) = match record.direction {
+        Direction::Upload => (icon::UPLOAD, theme::ACCENT),
+        Direction::Download => (icon::DOWNLOAD, theme::OK),
+    };
+    let (status, status_color) = match record.state {
+        TransferState::Queued => ("queue", theme::TEXT_FAINT),
+        TransferState::Running => ("running", theme::PENDING),
+        TransferState::Done => ("done", theme::OK),
+        TransferState::Failed => ("failed", theme::DANGER),
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(glyph).color(tint));
+        ui.label(
+            RichText::new(&record.label)
+                .color(theme::TEXT)
+                .monospace()
+                .small(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(status).color(status_color).small());
+        });
+    });
+
+    if record.state == TransferState::Running {
+        let bar = match record.fraction() {
+            Some(fraction) => egui::ProgressBar::new(fraction).show_percentage(),
+            None => egui::ProgressBar::new(0.0).animate(true),
+        };
+        ui.add(
+            bar.fill(theme::ACCENT)
+                .corner_radius(theme::R_SM)
+                .desired_height(6.0),
+        );
+    }
+
+    ui.label(
+        RichText::new(detail_line(&record))
+            .color(theme::TEXT_FAINT)
+            .small(),
+    );
+}
+
+fn detail_line(record: &TransferRecord) -> String {
+    let moved = human_size(record.bytes);
+    let size = match record.total {
+        Some(total) => format!("{moved} / {}", human_size(total)),
+        None => moved,
+    };
+    let mut parts = vec![
+        record.host.clone(),
+        record.direction.clone().label().to_owned(),
+        size,
+    ];
+
+    if record.state == TransferState::Running {
+        let rate = record.bytes_per_second();
+        if rate > 0.0 {
+            parts.push(format!("{}/s", human_size(rate as u64)));
+        }
+        if let Some(eta) = record.eta_seconds() {
+            parts.push(format!("{} left", format_duration(eta)));
+        }
+    } else {
+        parts.push(relative_time(record.at));
+    }
+
+    parts.join(" · ")
+}
+
+fn format_duration(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60),
+    }
 }

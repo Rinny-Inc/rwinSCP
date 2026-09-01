@@ -33,6 +33,7 @@ impl Direction {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum TransferState {
+    Queued,
     Running,
     Done,
     Failed,
@@ -43,24 +44,52 @@ pub struct TransferRecord {
     pub host: String,
     pub direction: Direction,
     pub bytes: u64,
+    pub total: Option<u64>,
     pub state: TransferState,
     pub at: Instant,
 }
 
-pub struct Transfer {
-    pub label: String,
-    pub transferred: u64,
-    pub total: u64,
+impl TransferRecord {
+    pub fn fraction(&self) -> Option<f32> {
+        let total = self.total?;
+        if total == 0 {
+            return None;
+        }
+        Some((self.bytes as f32 / total as f32).clamp(0.0, 1.0))
+    }
+
+    pub fn bytes_per_second(&self) -> f64 {
+        let seconds = self.at.elapsed().as_secs_f64();
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        self.bytes as f64 / seconds
+    }
+
+    pub fn eta_seconds(&self) -> Option<u64> {
+        if self.state != TransferState::Running {
+            return None;
+        }
+
+        let total = self.total?;
+        let rate = self.bytes_per_second();
+        if rate <= 0.0 || self.bytes >= total {
+            return None;
+        }
+        Some(((total - self.bytes) as f64 / rate).ceil() as u64)
+    }
 }
 
-impl Transfer {
-    pub fn fraction(&self) -> f32 {
-        if self.total == 0 {
-            0.0
-        } else {
-            (self.transferred as f32 / self.total as f32).clamp(0.0, 1.0)
-        }
-    }
+pub struct PendingTransfer {
+    profile: ConnectionProfile,
+    command: Command,
+    record: usize,
+}
+
+pub struct TransferJob {
+    worker: WorkerHandle,
+    record: usize,
+    seen: std::collections::HashMap<String, u64>,
 }
 
 pub struct Terminal {
@@ -82,11 +111,9 @@ pub struct Session {
     pub entries: Vec<RemoteEntry>,
     pub selection: HashSet<usize>,
     pub anchor: Option<usize>,
-    pub transfer: Option<Transfer>,
     pub loading: bool,
     pub terminal: Option<Terminal>,
     pub path_edit: Option<String>,
-    pub batch_bytes: std::collections::HashMap<String, u64>,
 }
 
 impl Session {
@@ -182,6 +209,8 @@ pub struct App {
     pub active: Option<usize>,
     pub log: Vec<LogLine>,
     pub history: Vec<TransferRecord>,
+    jobs: Vec<TransferJob>,
+    queue: std::collections::VecDeque<PendingTransfer>,
     pub show_history: bool,
     pub show_log: bool,
 }
@@ -196,6 +225,8 @@ impl Default for App {
             active: None,
             log: Vec::new(),
             history: Vec::new(),
+            jobs: Vec::new(),
+            queue: std::collections::VecDeque::new(),
             show_history: false,
             show_log: true,
         }
@@ -204,6 +235,7 @@ impl Default for App {
 
 const LOG_CAPACITY: usize = 500;
 pub const HISTORY_CAPACITY: usize = 75;
+pub const MAX_CONCURRENT_TRANSFERS: usize = 3;
 
 impl App {
     pub fn load() -> Self {
@@ -276,34 +308,141 @@ impl App {
         self.push_log(text, LogLevel::Error);
     }
 
-    fn begin_transfer(&mut self, label: String, host: String, direction: Direction) {
+    fn queue_transfer(
+        &mut self,
+        label: String,
+        direction: Direction,
+        command: Command,
+        total: Option<u64>,
+    ) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        let host = session.profile.display_name().to_owned();
+        let profile = session.profile.clone();
+
         self.history.push(TransferRecord {
             label,
             host,
             direction,
             bytes: 0,
-            state: TransferState::Running,
+            total,
+            state: TransferState::Queued,
             at: Instant::now(),
         });
         if self.history.len() > HISTORY_CAPACITY {
-            let excess = self.history.iter().len() - HISTORY_CAPACITY;
+            let excess = self.history.len() - HISTORY_CAPACITY;
             self.history.drain(..excess);
+            for job in &mut self.jobs {
+                job.record = job.record.saturating_sub(excess);
+            }
+            for pending in &mut self.queue {
+                pending.record = pending.record.saturating_sub(excess);
+            }
+        }
+
+        let record = self.history.len() - 1;
+        self.queue.push_back(PendingTransfer {
+            profile,
+            command,
+            record,
+        });
+
+        self.show_history = true;
+        self.start_queued();
+    }
+
+    fn start_queued(&mut self) {
+        while self.jobs.len() < MAX_CONCURRENT_TRANSFERS {
+            let Some(pending) = self.queue.pop_front() else {
+                return;
+            };
+            let job = TransferJob {
+                worker: backend::spawn(pending.profile),
+                record: pending.record,
+                seen: std::collections::HashMap::new(),
+            };
+            if let Some(record) = self.history.get_mut(pending.record) {
+                record.state = TransferState::Running;
+                record.at = Instant::now();
+            }
+            job.worker.send(pending.command);
+            self.jobs.push(job);
         }
     }
 
-    fn finish_transfer(&mut self, label: &str, state: TransferState, bytes: u64) {
-        let Some(record) = self
-            .history
-            .iter_mut()
-            .rev()
-            .find(|r| r.label == label && r.state == TransferState::Running)
-        else {
-            return;
-        };
+    fn poll_transfers(&mut self, ctx: &egui::Context) {
+        let mut finished_indices = Vec::new();
+        let mut logs: Vec<(String, LogLevel)> = Vec::new();
+        let mut busy = false;
 
-        record.state = state;
-        if bytes > 0 {
-            record.bytes = bytes;
+        for (index, job) in self.jobs.iter_mut().enumerate() {
+            let mut done = false;
+
+            while let Ok(event) = job.worker.try_recv() {
+                match event {
+                    Event::Connected => {}
+                    Event::Progress {
+                        transferred,
+                        total,
+                        label,
+                    } => {
+                        if let Some(record) = self.history.get_mut(job.record)
+                            && record.total.is_none()
+                            && total > 0
+                            && label == record.label
+                        {
+                            record.total = Some(total);
+                        }
+                        job.seen.insert(label, transferred);
+                        busy = true;
+                    }
+                    Event::TransferDone { label } => {
+                        if let Some(record) = self.history.get_mut(job.record) {
+                            record.bytes = job.seen.values().sum();
+                            record.state = TransferState::Done;
+                            logs.push((format!("Finished {label}"), LogLevel::Success));
+                        }
+                        done = true;
+                    }
+                    Event::ConnectFailed(message) | Event::Error(message) => {
+                        if let Some(record) = self.history.get_mut(job.record) {
+                            record.state = TransferState::Failed;
+                            logs.push((format!("{}: {message}", record.label), LogLevel::Error));
+                        }
+                        done = true;
+                    }
+                    Event::Disconnected => done = true,
+
+                    _ => {}
+                }
+            }
+
+            if !done && let Some(record) = self.history.get_mut(job.record) {
+                let moved: u64 = job.seen.values().sum();
+                if moved != record.bytes {
+                    record.bytes = moved;
+                    busy = true;
+                }
+            }
+
+            if done {
+                job.worker.send(Command::Disconnect);
+                finished_indices.push(index);
+            }
+        }
+
+        for index in finished_indices.into_iter().rev() {
+            self.jobs.remove(index);
+        }
+        for (text, level) in logs {
+            self.push_log(text, level);
+        }
+
+        self.start_queued();
+
+        if busy || !self.jobs.is_empty() {
+            ctx.request_repaint();
         }
     }
 
@@ -548,13 +687,11 @@ impl App {
             entries: Vec::new(),
             selection: HashSet::new(),
             anchor: None,
-            transfer: None,
             loading: true,
             terminal: is_shell.then(|| Terminal {
                 output: String::new(),
             }),
             path_edit: None,
-            batch_bytes: std::collections::HashMap::new(),
         });
         self.active = Some(self.sessions.len() - 1);
     }
@@ -576,16 +713,17 @@ impl App {
             return;
         };
 
-        let host = session.profile.display_name().to_owned();
         for (remote_path, name) in targets {
             let local_path = dir.join(&name);
-            if let Some(session) = self.session() {
-                session.worker.send(Command::Download {
-                    remote_path: remote_path.clone(),
+            self.queue_transfer(
+                remote_path.clone(),
+                Direction::Download,
+                Command::Download {
+                    remote_path,
                     local_path,
-                });
-            }
-            self.begin_transfer(remote_path, host.clone(), Direction::Download);
+                },
+                None,
+            );
         }
     }
 
@@ -605,8 +743,6 @@ impl App {
             return;
         };
         let cwd = session.cwd.clone();
-        let host = session.profile.display_name().to_owned();
-
         let mut skipped = 0;
         let mut queued = Vec::new();
         for local_path in paths {
@@ -623,13 +759,16 @@ impl App {
         }
 
         for (local_path, remote_path) in queued {
-            if let Some(session) = self.session() {
-                session.worker.send(Command::Upload {
+            let total = local_size(&local_path);
+            self.queue_transfer(
+                remote_path.clone(),
+                Direction::Upload,
+                Command::Upload {
                     local_path,
                     remote_path: remote_path.clone(),
-                });
-            }
-            self.begin_transfer(remote_path, host.clone(), Direction::Upload);
+                },
+                total,
+            );
         }
     }
 
@@ -653,7 +792,6 @@ impl App {
 
     fn poll_worker(&mut self, ctx: &egui::Context) {
         let mut logs: Vec<(String, LogLevel)> = Vec::new();
-        let mut finished: Vec<(String, TransferState, u64)> = Vec::new();
         let mut closed: Vec<usize> = Vec::new();
         let mut busy = false;
 
@@ -695,35 +833,8 @@ impl App {
                         session.loading = false;
                     }
 
-                    Event::Progress {
-                        transferred,
-                        total,
-                        label,
-                    } => {
-                        session.batch_bytes.insert(label.clone(), transferred);
-                        session.transfer = Some(Transfer {
-                            label,
-                            transferred,
-                            total,
-                        });
-                    }
-
-                    Event::TransferDone { label } => {
-                        let prefix = format!("{label}/");
-                        let moved: u64 = session
-                            .batch_bytes
-                            .iter()
-                            .filter(|(k, _)| *k == &label || k.starts_with(&prefix))
-                            .map(|(_, v)| *v)
-                            .sum();
-                        session
-                            .batch_bytes
-                            .retain(|k, _| k != &label && !k.starts_with(&prefix));
-                        finished.push((label.clone(), TransferState::Done, moved));
-                        session.transfer = None;
-                        logs.push((format!("Finished {label}"), LogLevel::Success));
-                        session.refresh();
-                    }
+                    Event::Progress { .. } => {}
+                    Event::TransferDone { .. } => session.refresh(),
 
                     Event::ExecOutput(output) => {
                         logs.push((output, LogLevel::Info));
@@ -737,13 +848,6 @@ impl App {
                     }
 
                     Event::Error(message) => {
-                        if let Some(active) = session.transfer.as_ref() {
-                            finished.push((
-                                active.label.clone(),
-                                TransferState::Failed,
-                                active.transferred,
-                            ));
-                        }
                         session.loading = false;
                         logs.push((message, LogLevel::Error));
                     }
@@ -755,14 +859,11 @@ impl App {
                 }
             }
 
-            busy |= session.transfer.is_some() || session.loading;
+            busy |= session.loading;
         }
 
         for (text, level) in logs {
             self.push_log(text, level);
-        }
-        for (label, state, bytes) in finished {
-            self.finish_transfer(&label, state, bytes);
         }
 
         closed.sort_unstable();
@@ -792,12 +893,28 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_worker(&ui.ctx().clone());
+        let ctx = ui.ctx().clone();
+        self.poll_worker(&ctx);
+        self.poll_transfers(&ctx);
 
         if let Some(action) = ui::root(self, ui) {
             self.apply(action);
         }
     }
+}
+
+fn local_size(path: &std::path::Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.is_file() {
+        return Some(meta.len());
+    }
+
+    let mut total = 0;
+    for entry in std::fs::read_dir(path).ok()? {
+        let entry = entry.ok()?;
+        total += local_size(&entry.path())?;
+    }
+    Some(total)
 }
 
 pub fn join_path(dir: &str, name: &str) -> String {

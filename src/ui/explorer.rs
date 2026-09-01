@@ -1,5 +1,3 @@
-use std::thread::scope;
-
 use egui::{Align2, CornerRadius, FontId, RichText, Sense, Ui, Vec2};
 
 use crate::app::{Action, App, Session, Status, human_size, parent_path};
@@ -27,24 +25,6 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let session = app.session()?;
     ui.add_space(theme::S2);
     keep(&mut action, toolbar(ui, session));
-
-    if let Some(transfer) = &session.transfer {
-        ui.add_space(theme::S2);
-        ui.add(
-            egui::ProgressBar::new(transfer.fraction())
-                .fill(theme::ACCENT)
-                .corner_radius(theme::R_SM)
-                .text(
-                    RichText::new(format!(
-                        "{}  {} / {}",
-                        transfer.label,
-                        human_size(transfer.transferred),
-                        human_size(transfer.total)
-                    ))
-                    .small(),
-                ),
-        );
-    }
 
     ui.add_space(theme::S3);
     keep(&mut action, table(ui, session));
