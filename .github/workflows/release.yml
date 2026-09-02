@@ -16,10 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             label: macOS (Apple Silicon)
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             label: macOS (Intel)
           - os: ubuntu-latest
