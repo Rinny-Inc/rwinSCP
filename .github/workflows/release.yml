@@ -1,0 +1,129 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            label: macOS (Apple Silicon)
+          - os: macos-13
+            target: x86_64-apple-darwin
+            label: macOS (Intel)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: Linux (x86_64)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: Windows (x86_64)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libssh2-1-dev cmake \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libxkbcommon-dev libwayland-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Bundle macOS .app
+        if: runner.os == 'macOS'
+        run: |
+          APP="rwinSCP.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/rwinSCP" "$APP/Contents/MacOS/"
+
+          mkdir icon.iconset
+          for size in 16 32 128 256 512; do
+            sips -z $size $size assets/icon.png --out "icon.iconset/icon_${size}x${size}.png"
+            sips -z $((size * 2)) $((size * 2)) assets/icon.png \
+              --out "icon.iconset/icon_${size}x${size}@2x.png"
+          done
+          iconutil -c icns icon.iconset -o "$APP/Contents/Resources/rwinSCP.icns"
+
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>rwinSCP</string>
+            <key>CFBundleDisplayName</key><string>rwinSCP</string>
+            <key>CFBundleIdentifier</key><string>com.rinny.rwinscp</string>
+            <key>CFBundleExecutable</key><string>rwinSCP</string>
+            <key>CFBundleIconFile</key><string>rwinSCP.icns</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          zip -qry "rwinSCP-${{ matrix.target }}.zip" "$APP"
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        run: |
+          tar -czf "rwinSCP-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" rwinSCP
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/rwinSCP.exe" `
+            -DestinationPath "rwinSCP-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rwinSCP-${{ matrix.target }}
+          path: |
+            rwinSCP-*.zip
+            rwinSCP-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/rwinSCP-*.zip
+            artifacts/rwinSCP-*.tar.gz
+          generate_release_notes: true
+          draft: true

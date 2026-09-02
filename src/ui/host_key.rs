@@ -3,7 +3,7 @@ use egui::{Context, RichText};
 use crate::{
     app::{Action, App},
     theme,
-    ui::{self, widgets},
+    ui::widgets,
 };
 
 pub fn show(app: &App, ctx: &Context) -> Option<Action> {

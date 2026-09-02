@@ -556,3 +556,79 @@ fn format_unix_time(secs: u64) -> String {
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_reference_vectors() {
+        assert_eq!(base64_no_pad(b""), "");
+        assert_eq!(base64_no_pad(b"f"), "Zg");
+        assert_eq!(base64_no_pad(b"fo"), "Zm8");
+        assert_eq!(base64_no_pad(b"foo"), "Zm9v");
+        assert_eq!(base64_no_pad(b"foob"), "Zm9vYg");
+        assert_eq!(base64_no_pad(b"fooba"), "Zm9vYmE");
+        assert_eq!(base64_no_pad(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_covers_the_whole_alphabet() {
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let encoded = base64_no_pad(&bytes);
+        assert!(encoded.contains('+') && encoded.contains('/'));
+        assert_eq!(encoded.len(), 342);
+    }
+
+    fn profile(host: &str) -> ConnectionProfile {
+        let mut p = ConnectionProfile::new(Protocol::Sftp);
+        p.host = host.to_owned();
+        p
+    }
+
+    #[test]
+    fn bare_host_takes_the_protocol_default_port() {
+        let mut p = profile("example.com");
+        p.normalize_endpoint();
+        assert_eq!(p.host, "example.com");
+        assert_eq!(p.port, 22);
+    }
+
+    #[test]
+    fn inline_port_is_split_off() {
+        let mut p = profile("example.com:2222");
+        p.normalize_endpoint();
+        assert_eq!(p.host, "example.com");
+        assert_eq!(p.port, 2222);
+    }
+
+    #[test]
+    fn bracketed_ipv6_keeps_its_colons() {
+        let mut p = profile("[::1]:2222");
+        p.normalize_endpoint();
+        assert_eq!(p.host, "[::1]");
+        assert_eq!(p.port, 2222);
+    }
+
+    #[test]
+    fn bare_ipv6_is_left_alone() {
+        let mut p = profile("fe80::1");
+        p.normalize_endpoint();
+        assert_eq!(p.host, "fe80::1");
+        assert_eq!(p.port, 22);
+    }
+
+    #[test]
+    fn a_nonsense_port_falls_back_to_the_default() {
+        let mut p = profile("example.com:notaport");
+        p.normalize_endpoint();
+        assert_eq!(p.port, 22);
+    }
+
+    #[test]
+    fn switching_protocol_moves_the_default_port() {
+        let mut p = profile("example.com");
+        p.set_protocol(Protocol::Ftp);
+        assert_eq!(p.port, 21);
+    }
+}

@@ -102,7 +102,7 @@ fn row(ui: &mut Ui, record: &TransferRecord) {
     }
 
     ui.label(
-        RichText::new(detail_line(&record))
+        RichText::new(detail_line(record))
             .color(theme::TEXT_FAINT)
             .small(),
     );

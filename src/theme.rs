@@ -12,6 +12,7 @@ pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x7A, 0x7F, 0x88);
 
 pub const ACCENT: Color32 = Color32::from_rgb(0xEC, 0x48, 0x99);
 // FIXME: reserved for a hover effect
+#[allow(dead_code, reason = "part of the published palette")]
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xF0, 0x6C, 0xAD);
 
 pub const OK: Color32 = Color32::from_rgb(0x00, 0xC4, 0x70);

@@ -139,3 +139,45 @@ fn parse_list_line(line: &str) -> Option<RemoteEntry> {
         modified: Some(format!("{month} {day} {time_or_year}")),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_unix_list_line() {
+        let entry = parse_list_line("-rw-r--r-- 1 user group 4096 Jan  1 00:00 readme.txt")
+            .expect("should parse");
+        assert_eq!(entry.name, "readme.txt");
+        assert_eq!(entry.size, 4096);
+        assert!(!entry.is_dir);
+    }
+
+    #[test]
+    fn directories_are_recognised() {
+        let entry = parse_list_line("drwxr-xr-x 2 user group 4096 Jan  1 00:00 docs")
+            .expect("should parse");
+        assert!(entry.is_dir);
+    }
+
+    #[test]
+    fn names_with_spaces_survive() {
+        let entry =
+            parse_list_line("-rw-r--r-- 1 user group 12 Jan  1 00:00 my holiday photos.zip")
+                .expect("should parse");
+        assert_eq!(entry.name, "my holiday photos.zip");
+    }
+
+    #[test]
+    fn unparseable_lines_are_skipped_not_guessed() {
+        assert!(parse_list_line("total 42").is_none());
+        assert!(parse_list_line("").is_none());
+        assert!(parse_list_line("garbage").is_none());
+    }
+
+    #[test]
+    fn dot_entries_are_dropped() {
+        assert!(parse_list_line("drwxr-xr-x 2 u g 4096 Jan  1 00:00 .").is_none());
+        assert!(parse_list_line("drwxr-xr-x 2 u g 4096 Jan  1 00:00 ..").is_none());
+    }
+}

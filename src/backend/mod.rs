@@ -17,6 +17,10 @@ pub struct RemoteEntry {
 
 /// UI -> worker.
 #[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "Rename and Exec are implemented by every backend but not yet wired to a view"
+)]
 pub enum Command {
     List {
         path: String,
@@ -81,7 +85,7 @@ pub enum Event {
 pub struct WorkerHandle {
     tx: Sender<Command>,
     rx: Receiver<Event>,
-    thread: std::thread::JoinHandle<()>,
+    _thread: std::thread::JoinHandle<()>,
 }
 
 impl WorkerHandle {
@@ -112,7 +116,7 @@ pub fn spawn(profile: ConnectionProfile) -> WorkerHandle {
     WorkerHandle {
         tx,
         rx,
-        thread: thread,
+        _thread: thread,
     }
 }
 

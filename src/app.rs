@@ -1073,3 +1073,78 @@ pub fn append_terminal_output(buffer: &mut String, chunk: &str) {
         buffer.drain(..cut);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_path_uses_one_separator() {
+        assert_eq!(join_path("/home/user", "file.txt"), "/home/user/file.txt");
+        assert_eq!(join_path("/home/user/", "file.txt"), "/home/user/file.txt");
+        assert_eq!(join_path("/", "file.txt"), "/file.txt");
+        assert_eq!(join_path("", "file.txt"), "/file.txt");
+        assert_eq!(join_path("/a", "/b"), "/a/b");
+    }
+
+    #[test]
+    fn parent_path_saturates_at_root() {
+        assert_eq!(parent_path("/home/user/docs"), "/home/user");
+        assert_eq!(parent_path("/home"), "/");
+        assert_eq!(parent_path("/"), "/");
+        assert_eq!(parent_path("/home/user/"), "/home");
+    }
+
+    #[test]
+    fn human_size_switches_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn crlf_is_a_line_break_not_a_rewind() {
+        let mut buffer = String::new();
+        append_terminal_output(&mut buffer, "hello\r\nworld\r\n");
+        assert_eq!(buffer, "hello\nworld\n");
+    }
+
+    #[test]
+    fn lone_cr_rewrites_the_current_line() {
+        let mut buffer = String::new();
+        append_terminal_output(&mut buffer, "50%\r100%");
+        assert_eq!(buffer, "100%");
+    }
+
+    #[test]
+    fn escape_sequences_are_stripped() {
+        let mut buffer = String::new();
+        append_terminal_output(&mut buffer, "\u{1b}[32mgreen\u{1b}[0m\u{1b}[2Ktext");
+        assert_eq!(buffer, "greentext");
+
+        buffer.clear();
+        append_terminal_output(&mut buffer, "\u{1b}]0;window title\u{7}shell");
+        assert_eq!(buffer, "shell");
+    }
+
+    #[test]
+    fn backspace_removes_the_previous_character() {
+        let mut buffer = String::new();
+        append_terminal_output(&mut buffer, "abc\u{8}d");
+        assert_eq!(buffer, "abd");
+    }
+
+    #[test]
+    fn terminal_buffer_stays_bounded() {
+        let mut buffer = String::new();
+        for _ in 0..5_000 {
+            append_terminal_output(&mut buffer, &format!("{}\r\n", "x".repeat(60)));
+        }
+        assert!(
+            buffer.len() <= TERMINAL_CAPACITY + 200,
+            "buffer grew to {}",
+            buffer.len()
+        );
+    }
+}

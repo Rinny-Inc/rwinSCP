@@ -191,3 +191,64 @@ fn draw_output(ui: &mut Ui, text: &str) {
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs_f64(CURSOR_BLINK));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ctrl_letter_maps_to_control_codes() {
+        assert_eq!(encode_key(Key::C, ctrl()).as_deref(), Some("\u{3}"));
+        assert_eq!(encode_key(Key::A, ctrl()).as_deref(), Some("\u{1}"));
+        assert_eq!(encode_key(Key::D, ctrl()).as_deref(), Some("\u{4}"));
+    }
+
+    #[test]
+    fn ctrl_delete_does_not_send_eot() {
+        let encoded = encode_key(Key::Delete, ctrl()).expect("Delete is encodable");
+        assert_ne!(encoded, "\u{4}", "Ctrl+Delete must never send EOT");
+        assert!(encoded.starts_with('\u{1b}'), "expected an escape sequence");
+    }
+
+    #[test]
+    fn ctrl_space_is_nul_not_xoff() {
+        assert_eq!(encode_key(Key::Space, ctrl()).as_deref(), Some("\0"));
+    }
+
+    #[test]
+    fn plain_cursor_keys_use_bare_sequences() {
+        let plain = Modifiers::default();
+        assert_eq!(encode_key(Key::ArrowUp, plain).as_deref(), Some("\u{1b}[A"));
+        assert_eq!(
+            encode_key(Key::ArrowLeft, plain).as_deref(),
+            Some("\u{1b}[D")
+        );
+        assert_eq!(encode_key(Key::Home, plain).as_deref(), Some("\u{1b}[H"));
+    }
+
+    #[test]
+    fn modified_cursor_keys_carry_the_modifier() {
+        assert_eq!(
+            encode_key(Key::ArrowLeft, ctrl()).as_deref(),
+            Some("\u{1b}[1;5D")
+        );
+        assert_eq!(
+            encode_key(Key::Delete, ctrl()).as_deref(),
+            Some("\u{1b}[3;5~")
+        );
+    }
+
+    #[test]
+    fn enter_and_backspace_match_terminal_convention() {
+        let plain = Modifiers::default();
+        assert_eq!(encode_key(Key::Enter, plain).as_deref(), Some("\r"));
+        assert_eq!(encode_key(Key::Backspace, plain).as_deref(), Some("\u{7f}"));
+    }
+}
