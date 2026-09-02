@@ -7,8 +7,13 @@ mod theme;
 mod ui;
 
 fn main() -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default();
+    match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(e) => eprintln!("couldn't load window icon {e}"),
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: viewport
             .with_inner_size([1180.0, 780.0])
             .with_min_inner_size([880.0, 560.0])
             .with_title("rwinSCP"),

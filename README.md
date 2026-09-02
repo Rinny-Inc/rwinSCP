@@ -1,4 +1,9 @@
-# rwinSCP
+<p align="center">
+  <img src="assets/icon.png" alt="rwinSCP logo" width="235">
+</p>
+<h1 align="center">
+  <b>rwinSCP</b>
+</h1>
 
 A single-binary desktop client for **SSH, SFTP, SCP, FTP, and S3**, built
 with `egui`/`eframe`.
@@ -11,6 +16,7 @@ src/
   theme.rs          design tokens (palette, radii, spacing) + global style
   connection.rs     Protocol / Auth / ConnectionProfile
   app.rs            application state, Action reducer, worker polling
+  store.rs          credentials management
   backend/
     mod.rs          Command/Event contract + worker spawning
     ssh_sftp_scp.rs libssh2-backed SSH, SFTP, SCP
@@ -24,6 +30,7 @@ src/
     rail.rs         left icon rail
     dashboard.rs    Hosts page: search, recents, actions, grid
     host_card.rs    one host tile
+    history.rs      downloads/uploads history
     editor.rs       host form
     explorer.rs     breadcrumbs, toolbar, file table
     log_panel.rs    activity log
