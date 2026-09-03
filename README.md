@@ -5,6 +5,17 @@
   <b>rwinSCP</b>
 </h1>
 
+<p align="center">
+    <img alt="Rust" src="https://img.shields.io/badge/Rust-stable%20(MSRV)-orange?logo=rust">
+    <a href="https://github.com/Rinny-Inc/rwinSCP/actions/workflows/test.yml"><img alt="Build" src="https://github.com/Rinny-Inc/rwinSCP/actions/workflows/test.yml/badge.svg"></a>
+    <a href="https://github.com/Rinny-Inc/rwinSCP/releases">
+        <img src="https://img.shields.io/github/v/release/Rinny-Inc/rwinSCP" alt="Release"/>
+        <img src="https://img.shields.io/github/downloads/Rinny-Inc/rwinSCP/total" alt="Downloads"/>
+    </a>
+    <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform"/>
+    <a href="https://discord.com/invite/B2BgjwDX8m"><img alt="Discord" src="https://img.shields.io/discord/1352833901860487299?label=Discord&logo=discord"></a>
+</p>
+
 A single-binary desktop client for **SSH, SFTP, SCP, FTP, and S3**, built
 with `egui`/`eframe`.
 
