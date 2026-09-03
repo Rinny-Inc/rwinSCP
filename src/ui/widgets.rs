@@ -193,3 +193,88 @@ pub fn empty_state(ui: &mut Ui, title: &str, hint: &str) {
         ui.label(RichText::new(hint).color(theme::TEXT_FAINT).small());
     });
 }
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum EditorOutcome {
+    Commit,
+    Cancel,
+}
+
+pub struct InlineEditor<'a> {
+    pub glyph: &'a str,
+    pub context: Option<&'a str>,
+    pub hint: &'a str,
+    pub commit_label: Option<&'a str>,
+    pub width: Option<f32>,
+    pub id_salt: &'a str,
+}
+
+pub fn inline_editor(
+    ui: &mut Ui,
+    cfg: InlineEditor<'_>,
+    buffer: &mut String,
+) -> Option<EditorOutcome> {
+    let InlineEditor {
+        glyph,
+        context,
+        hint,
+        commit_label,
+        width,
+        id_salt,
+    } = cfg;
+
+    let mut outcome = None;
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(glyph).color(theme::ACCENT));
+
+        if let Some(context) = context {
+            ui.label(
+                RichText::new(context)
+                    .color(theme::TEXT_FAINT)
+                    .monospace()
+                    .small(),
+            );
+        }
+
+        let desired = width.unwrap_or_else(|| (ui.available_width() - 96.0).max(120.0));
+        let field = ui.add(
+            egui::TextEdit::singleline(buffer)
+                .id_salt(id_salt)
+                .font(egui::TextStyle::Monospace)
+                .hint_text(RichText::new(hint).color(theme::TEXT_FAINT))
+                .desired_width(desired),
+        );
+
+        if !field.has_focus() {
+            field.request_focus();
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field.id) {
+                let all = egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(buffer.chars().count()),
+                );
+                state.cursor.set_char_range(Some(all));
+                state.store(ui.ctx(), field.id);
+            }
+        }
+
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if enter && (field.has_focus() || field.lost_focus()) {
+            outcome = Some(EditorOutcome::Commit);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            outcome = Some(EditorOutcome::Cancel);
+        }
+
+        if let Some(commit_label) = commit_label {
+            if ui.small_button(commit_label).clicked() {
+                outcome = Some(EditorOutcome::Commit);
+            }
+            if ui.small_button("Cancel").clicked() {
+                outcome = Some(EditorOutcome::Cancel);
+            }
+        }
+    });
+
+    outcome
+}

@@ -355,46 +355,37 @@ async fn upload_tree(
     evt_tx: &Sender<Event>,
     cancel: &Cancel,
 ) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(local_dir)? {
+    let mut files = Vec::new();
+    super::walk_local(local_dir, cancel, &mut |entry| {
+        if !entry.is_dir {
+            files.push((entry.path, entry.relative));
+        }
+        Ok(())
+    })?;
+
+    for (path, relative) in files {
         if cancelled(cancel) {
             anyhow::bail!("cancelled");
         }
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let remote_child = format!("{}/{name}", remote_dir.trim_end_matches('/'));
+        let remote = format!("{}/{relative}", remote_dir.trim_end_matches('/'));
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let body = ByteStream::from_path(&path).await?;
 
-        if entry.file_type()?.is_dir() {
-            Box::pin(upload_tree(
-                client,
-                profile,
-                &entry.path(),
-                &remote_child,
-                evt_tx,
-                cancel,
-            ))
+        client
+            .put_object()
+            .bucket(&profile.bucket)
+            .key(as_key(&remote))
+            .body(body)
+            .send()
             .await?;
-        } else {
-            let path = entry.path();
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let body = ByteStream::from_path(&path).await?;
-            client
-                .put_object()
-                .bucket(&profile.bucket)
-                .key(as_key(&remote_child))
-                .body(body)
-                .send()
-                .await?;
-            evt_tx
-                .send(Event::Progress {
-                    transferred: size,
-                    total: size,
-                    label: remote_child.clone(),
-                })
-                .ok();
-        }
+
+        evt_tx
+            .send(Event::Progress {
+                transferred: size,
+                total: size,
+                label: remote,
+            })
+            .ok();
     }
     Ok(())
 }

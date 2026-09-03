@@ -96,39 +96,22 @@ fn breadcrumbs(ui: &mut Ui, cwd: &str, editing: Option<&mut String>) -> Option<A
     let mut action = None;
 
     if let Some(buffer) = editing {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(icon::FOLDER).color(theme::ACCENT));
-
-            let field = ui.add(
-                egui::TextEdit::singleline(buffer)
-                    .id_salt("path_bar")
-                    .font(egui::TextStyle::Monospace)
-                    .hint_text("/path/to/somewhere")
-                    .desired_width(ui.available_width() - 90.0),
-            );
-
-            if !field.has_focus() {
-                field.request_focus();
-                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field.id) {
-                    let all = egui::text::CCursorRange::two(
-                        egui::text::CCursor::new(0),
-                        egui::text::CCursor::new(buffer.chars().count()),
-                    );
-                    state.cursor.set_char_range(Some(all));
-                    state.store(ui.ctx(), field.id);
-                }
-            }
-
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if enter && (field.has_focus() || field.lost_focus()) {
-                action = Some(Action::CommitPath);
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                action = Some(Action::CancelPath);
-            }
+        return widgets::inline_editor(
+            ui,
+            widgets::InlineEditor {
+                glyph: icon::FOLDER,
+                context: None,
+                hint: "/path/to/somewhere",
+                commit_label: None,
+                width: None,
+                id_salt: "path_bar",
+            },
+            buffer,
+        )
+        .map(|outcome| match outcome {
+            widgets::EditorOutcome::Commit => Action::CommitPath,
+            widgets::EditorOutcome::Cancel => Action::CancelPath,
         });
-
-        return action;
     }
 
     ui.horizontal_wrapped(|ui| {
@@ -406,42 +389,20 @@ fn header_row(ui: &mut Ui) {
 }
 
 fn rename_bar(ui: &mut Ui, og: &str, edited: &mut String) -> Option<Action> {
-    let mut action = None;
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(icon::PENCIL).color(theme::ACCENT));
-        ui.label(
-            RichText::new(format!("{og}  \u{2192}"))
-                .color(theme::TEXT_FAINT)
-                .monospace()
-                .small(),
-        );
-
-        let field = ui.add(
-            egui::TextEdit::singleline(edited)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(280.0),
-        );
-
-        if !field.has_focus() {
-            field.request_focus();
-        }
-
-        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if enter && (field.has_focus() || field.lost_focus()) {
-            action = Some(Action::CommitRename);
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            action = Some(Action::CancelRename);
-        }
-
-        if ui.small_button("Rename").clicked() {
-            action = Some(Action::CommitRename);
-        }
-        if ui.small_button("Cancel").clicked() {
-            action = Some(Action::CancelRename);
-        }
-    });
-
-    action
+    let context = format!("{og}  \u{2192}");
+    match widgets::inline_editor(
+        ui,
+        widgets::InlineEditor {
+            glyph: icon::PENCIL,
+            context: Some(&context),
+            hint: "new name",
+            commit_label: Some("Rename"),
+            width: Some(280.0),
+            id_salt: "rename_bar",
+        },
+        edited,
+    )? {
+        widgets::EditorOutcome::Commit => Some(Action::CommitRename),
+        widgets::EditorOutcome::Cancel => Some(Action::CancelRename),
+    }
 }

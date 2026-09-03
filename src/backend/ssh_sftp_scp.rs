@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ssh2::Session;
 
 use super::{CHUNK, Command, Event, RemoteEntry};
-use crate::backend::{Cancel, cancelled, classify};
+use crate::backend::{Cancel, cancelled};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -26,16 +26,16 @@ pub fn run(
     evt_tx: Sender<Event>,
     cancel: Cancel,
 ) {
-    let session = match connect(&profile, &cmd_rx, &evt_tx) {
-        Ok(session) => session,
-        Err(e) => {
-            evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
-            return;
-        }
-    };
-    evt_tx.send(Event::Connected).ok();
-
     if profile.protocol == Protocol::Ssh {
+        let session = match connect(&profile, &cmd_rx, &evt_tx) {
+            Ok(session) => session,
+            Err(e) => {
+                evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+                return;
+            }
+        };
+        evt_tx.send(Event::Connected).ok();
+
         if let Err(e) = run_shell(&session, cmd_rx, &evt_tx) {
             evt_tx.send(Event::Error(e.to_string())).ok();
         }
@@ -45,22 +45,45 @@ pub fn run(
         return;
     }
 
-    let sftp = matches!(profile.protocol, Protocol::Sftp | Protocol::Scp)
-        .then(|| session.sftp().ok())
-        .flatten();
+    super::drive::<SshBackend>(profile, cmd_rx, evt_tx, cancel);
+}
 
-    while let Ok(cmd) = cmd_rx.recv() {
-        let stop = matches!(cmd, Command::Disconnect);
-        if let Err(e) = handle(&profile, &session, sftp.as_ref(), &cmd, &evt_tx, &cancel) {
-            evt_tx.send(classify(&cmd, e)).ok();
-        }
-        if stop {
-            break;
-        }
+struct SshBackend {
+    session: Session,
+    sftp: Option<ssh2::Sftp>,
+}
+
+impl super::Backend for SshBackend {
+    fn connect(
+        profile: &ConnectionProfile,
+        cmd_rx: &Receiver<Command>,
+        evt_tx: &Sender<Event>,
+    ) -> anyhow::Result<Self> {
+        let session = connect(profile, cmd_rx, evt_tx)?;
+        let sftp = session.sftp().ok();
+        Ok(Self { session, sftp })
     }
 
-    session.disconnect(None, "bye", None).ok();
-    evt_tx.send(Event::Disconnected).ok();
+    fn handle(
+        &mut self,
+        profile: &ConnectionProfile,
+        cmd: &Command,
+        evt_tx: &Sender<Event>,
+        cancel: &Cancel,
+    ) -> anyhow::Result<()> {
+        handle(
+            profile,
+            &self.session,
+            self.sftp.as_ref(),
+            cmd,
+            evt_tx,
+            cancel,
+        )
+    }
+
+    fn shutdown(self) {
+        self.session.disconnect(None, "bye", None).ok();
+    }
 }
 
 fn connect(
@@ -367,33 +390,19 @@ fn upload_dir(
 ) -> anyhow::Result<()> {
     sftp.mkdir(Path::new(remote_dir), 0o755).ok();
 
-    for entry in std::fs::read_dir(local_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue; // skip name that cannot be represented remotely
-        };
-        let remote_child = format!("{}/{name}", remote_dir.trim_end_matches('/'));
-        let local_child = entry.path();
+    super::walk_local(local_dir, cancel, &mut |entry| {
+        let remote = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.relative);
 
-        if entry.file_type()?.is_dir() {
-            upload_dir(sftp, &local_child, &remote_child, evt_tx, cancel)?;
-        } else {
-            let mut local = File::open(&local_child)?;
-            let total = local.metadata()?.len();
-            let mut remote = sftp.create(Path::new(&remote_child))?;
-            pump(
-                &mut local,
-                &mut remote,
-                total,
-                &remote_child,
-                evt_tx,
-                cancel,
-            )?;
+        if entry.is_dir {
+            sftp.mkdir(Path::new(&remote), 0o755).ok();
+            return Ok(());
         }
-    }
 
-    Ok(())
+        let mut local = File::open(&entry.path)?;
+        let total = local.metadata()?.len();
+        let mut target = sftp.create(Path::new(&remote))?;
+        pump(&mut local, &mut target, total, &remote, evt_tx, cancel)
+    })
 }
 
 fn download_dir(

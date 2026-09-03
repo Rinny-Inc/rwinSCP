@@ -179,40 +179,30 @@ fn upload_dir(
     evt_tx: &Sender<Event>,
     cancel: &Cancel,
 ) -> anyhow::Result<()> {
-    if cancelled(cancel) {
-        anyhow::bail!("cancelled");
-    }
     ftp.mkdir(remote_dir).ok();
 
-    for entry in std::fs::read_dir(local_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let remote_child = format!("{}/{name}", remote_dir.trim_end_matches('/'));
+    super::walk_local(local_dir, cancel, &mut |entry| {
+        let remote = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.relative);
 
-        if entry.file_type()?.is_dir() {
-            upload_dir(ftp, &entry.path(), &remote_child, evt_tx, cancel)?;
-        } else {
-            if cancelled(cancel) {
-                anyhow::bail!("cancelled");
-            }
-            let mut input = BufReader::new(File::open(entry.path())?);
-            ftp.put_file(&remote_child, &mut input)?;
-            let moved = std::fs::metadata(entry.path())
-                .map(|m| m.len())
-                .unwrap_or(0);
-            evt_tx
-                .send(Event::Progress {
-                    transferred: moved,
-                    total: moved,
-                    label: remote_child.clone(),
-                })
-                .ok();
+        if entry.is_dir {
+            ftp.mkdir(&remote).ok();
+            return Ok(());
         }
-    }
-    Ok(())
+
+        let mut input = BufReader::new(File::open(&entry.path)?);
+        ftp.put_file(&remote, &mut input)?;
+
+        let moved = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
+        evt_tx
+            .send(Event::Progress {
+                transferred: moved,
+                total: moved,
+                label: remote,
+            })
+            .ok();
+
+        Ok(())
+    })
 }
 
 fn download_dir(

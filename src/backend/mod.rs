@@ -19,7 +19,7 @@ pub struct RemoteEntry {
 #[derive(Debug)]
 #[allow(
     dead_code,
-    reason = "Rename and Exec are implemented by every backend but not yet wired to a view"
+    reason = "Exec is implemented by every backend but not yet wired to a view"
 )]
 pub enum Command {
     List {
@@ -139,13 +139,114 @@ pub fn spawn(profile: ConnectionProfile) -> WorkerHandle {
     }
 }
 
+trait Backend: Sized {
+    fn connect(
+        profile: &ConnectionProfile,
+        cmd_rx: &Receiver<Command>,
+        evt_tx: &Sender<Event>,
+    ) -> anyhow::Result<Self>;
+
+    fn handle(
+        &mut self,
+        profile: &ConnectionProfile,
+        cmd: &Command,
+        evt_tx: &Sender<Event>,
+        cancel: &Cancel,
+    ) -> anyhow::Result<()>;
+
+    fn shutdown(self) {}
+}
+
+fn drive<B: Backend>(
+    profile: ConnectionProfile,
+    cmd_rx: Receiver<Command>,
+    evt_tx: Sender<Event>,
+    cancel: Cancel,
+) {
+    let mut backend = match B::connect(&profile, &cmd_rx, &evt_tx) {
+        Ok(backend) => backend,
+        Err(e) => {
+            evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+            return;
+        }
+    };
+    evt_tx.send(Event::Connected).ok();
+
+    while let Ok(cmd) = cmd_rx.recv() {
+        let stop = matches!(cmd, Command::Disconnect);
+
+        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        if let Err(e) = backend.handle(&profile, &cmd, &evt_tx, &cancel) {
+            evt_tx.send(classify(&cmd, e)).ok();
+        }
+        if stop {
+            break;
+        }
+    }
+
+    backend.shutdown();
+    evt_tx.send(Event::Disconnected).ok();
+}
+
+struct LocalEntry {
+    pub path: std::path::PathBuf,
+    pub relative: String,
+    pub is_dir: bool,
+}
+
+fn walk_local(
+    root: &std::path::Path,
+    cancel: &Cancel,
+    visit: &mut impl FnMut(LocalEntry) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    walk_from(root, String::new(), cancel, visit)
+}
+
+fn walk_from(
+    dir: &std::path::Path,
+    prefix: String,
+    cancel: &Cancel,
+    visit: &mut impl FnMut(LocalEntry) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        if cancelled(cancel) {
+            anyhow::bail!("cancelled");
+        }
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let relative = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let is_dir = entry.file_type()?.is_dir();
+
+        visit(LocalEntry {
+            path: entry.path(),
+            relative: relative.clone(),
+            is_dir,
+        })?;
+
+        if is_dir {
+            walk_from(&entry.path(), relative, cancel, visit)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Shared chunk size for streamed transfers
-pub(crate) const CHUNK: usize = 64 * 1024;
-pub(crate) type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
-pub(crate) fn cancelled(flag: &Cancel) -> bool {
+const CHUNK: usize = 64 * 1024;
+
+type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
+fn cancelled(flag: &Cancel) -> bool {
     flag.load(std::sync::atomic::Ordering::Relaxed)
 }
-pub(crate) fn classify(cmd: &Command, error: anyhow::Error) -> Event {
+fn classify(cmd: &Command, error: anyhow::Error) -> Event {
     let message = error.to_string();
     let label = match cmd {
         Command::Download { remote_path, .. } => remote_path.clone(),
