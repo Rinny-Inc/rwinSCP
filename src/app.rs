@@ -191,6 +191,8 @@ pub enum Action {
     DroppedFiles(Vec<std::path::PathBuf>),
     ToggleHistory,
     ClearHistory,
+    OpenUpdate,
+    DismissUpdate,
     Mkdir,
     DeleteSelected,
     ClickRow(usize, egui::Modifiers),
@@ -221,6 +223,8 @@ pub struct App {
     jobs: Vec<TransferJob>,
     queue: std::collections::VecDeque<PendingTransfer>,
     pub pending_host_key: Option<PendingHostKey>,
+    update_check: Option<crate::update::UpdateCheck>,
+    pub update_available: Option<crate::update::Available>,
     pub show_history: bool,
     pub show_log: bool,
 }
@@ -238,6 +242,8 @@ impl Default for App {
             jobs: Vec::new(),
             queue: std::collections::VecDeque::new(),
             pending_host_key: None,
+            update_check: None,
+            update_available: None,
             show_history: false,
             show_log: true,
         }
@@ -254,6 +260,7 @@ impl App {
         let restored = hosts.len();
         let mut app = Self {
             hosts,
+            update_check: Some(crate::update::UpdateCheck::spawn()),
             ..Self::default()
         };
         if restored > 0 {
@@ -625,6 +632,16 @@ impl App {
                 }
             }
 
+            Action::OpenUpdate => {
+                if let Some(update) = &self.update_available {
+                    crate::update::open_in_browser(&update.url);
+                }
+            }
+            Action::DismissUpdate => {
+                self.update_available = None;
+                self.update_check = None;
+            }
+
             Action::Mkdir => {
                 if let Some(session) = self.session_mut() {
                     let path = join_path(&session.cwd, "new-folder");
@@ -943,6 +960,14 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_worker(&ctx);
         self.poll_transfers(&ctx);
+
+        if self.update_available.is_none()
+            && let Some(check) = &self.update_check
+            && let Some(available) = check.poll()
+        {
+            self.info(format!("Version {} is available", available.version));
+            self.update_available = Some(available);
+        }
 
         if let Some(action) = ui::root(self, ui) {
             self.apply(action);

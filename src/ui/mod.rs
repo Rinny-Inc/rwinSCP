@@ -8,6 +8,7 @@ pub mod log_panel;
 pub mod rail;
 pub mod tabs;
 pub mod terminal;
+pub mod update_banner;
 pub mod widgets;
 
 use egui::Ui;
@@ -23,6 +24,8 @@ pub(crate) fn keep(slot: &mut Option<Action>, candidate: Option<Action>) {
 
 pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let mut action = None;
+
+    keep(&mut action, update_banner::show(app, ui));
 
     egui::Panel::left("rail")
         .resizable(false)

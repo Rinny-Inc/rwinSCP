@@ -84,8 +84,15 @@ jobs:
           </plist>
           PLIST
 
-          zip -qry "rwinSCP-${{ matrix.target }}.zip" "$APP"
+          codesign --force --sign - "$APP/Contents/MacOS/rwinSCP"
+          codesign --force --sign - "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
 
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$APP" "rwinSCP-${{ matrix.target }}.zip"
+
+          tar -czf "rwinSCP-${{ matrix.target }}-bin.tar.gz" \
+            -C "target/${{ matrix.target }}/release" rwinSCP
       - name: Package Linux binary
         if: runner.os == 'Linux'
         run: |
@@ -127,3 +134,34 @@ jobs:
             artifacts/rwinSCP-*.tar.gz
           generate_release_notes: true
           draft: true
+          body: |
+            ## Downloads
+
+            | Platform | File |
+            | --- | --- |
+            | macOS (Apple Silicon) | `rwinSCP-aarch64-apple-darwin.zip` (app bundle) or `-bin.tar.gz` (executable) |
+            | macOS (Intel) | `rwinSCP-x86_64-apple-darwin.zip` (app bundle) or `-bin.tar.gz` (executable) |
+            | Linux (x86_64) | `rwinSCP-x86_64-unknown-linux-gnu.tar.gz` |
+            | Windows (x86_64) | `rwinSCP-x86_64-pc-windows-msvc.zip` |
+
+            ### macOS: first run
+
+            These builds are signed ad-hoc, not with a paid Developer ID, so
+            macOS quarantines them on download. Clear the quarantine flag:
+
+            ```sh
+            xattr -dr com.apple.quarantine /Applications/rwinSCP.app
+            ```
+
+            Or right-click the app and choose **Open**, then confirm.
+
+            The bare executable needs the same treatment:
+
+            ```sh
+            xattr -d com.apple.quarantine ./rwinSCP && chmod +x ./rwinSCP
+            ```
+
+            ### Linux
+
+            Needs `libssh2` and OpenSSL at runtime:
+            `sudo apt install libssh2-1 openssl`

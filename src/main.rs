@@ -5,6 +5,7 @@ mod icon;
 mod store;
 mod theme;
 mod ui;
+mod update;
 
 fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default();
