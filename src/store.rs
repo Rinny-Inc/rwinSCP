@@ -26,6 +26,8 @@ struct StoredHost {
     key_path: String,
     #[serde(default)]
     access_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_used: Option<u64>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -146,6 +148,11 @@ fn from_host(host: &Host) -> StoredHost {
         auth_kind: auth_kind.to_owned(),
         key_path,
         access_key,
+        last_used: host.last_used.and_then(|time| {
+            time.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs())
+        }),
     }
 }
 
@@ -184,6 +191,8 @@ fn into_host(stored: StoredHost) -> Host {
     Host {
         id: stored.id,
         profile,
-        last_used: None,
+        last_used: stored
+            .last_used
+            .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
     }
 }

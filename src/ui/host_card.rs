@@ -1,6 +1,6 @@
 use egui::{Align, Layout, RichText, Ui, Vec2};
 
-use crate::app::{Action, Host, relative_time};
+use crate::app::{Action, Host, relative_time_since};
 use crate::connection::Protocol;
 use crate::icon;
 use crate::theme;
@@ -65,7 +65,7 @@ pub fn show(ui: &mut Ui, index: usize, host: &Host) -> Option<Action> {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.horizontal(|ui| {
                 let (dot, label) = match host.last_used {
-                    Some(at) => (theme::OK, relative_time(at)),
+                    Some(at) => (theme::OK, relative_time_since(at)),
                     None => (theme::TEXT_FAINT, "never connected".to_owned()),
                 };
                 widgets::status_dot(ui, dot, 6.0);

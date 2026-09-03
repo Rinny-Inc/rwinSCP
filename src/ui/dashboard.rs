@@ -1,6 +1,6 @@
 use egui::{RichText, Ui};
 
-use crate::app::{Action, App, relative_time};
+use crate::app::{Action, App, relative_time_since};
 use crate::connection::Protocol;
 use crate::icon;
 use crate::theme;
@@ -52,7 +52,7 @@ fn recents(app: &App, ui: &mut Ui) -> Option<Action> {
         widgets::status_dot(ui, theme::host_color(host.profile.display_name()), 8.0);
         ui.label(RichText::new(host.profile.display_name()).color(theme::TEXT));
         ui.label(
-            RichText::new(relative_time(last_used))
+            RichText::new(relative_time_since(last_used))
                 .color(theme::TEXT_FAINT)
                 .small(),
         );

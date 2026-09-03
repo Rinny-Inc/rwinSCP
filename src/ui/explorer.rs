@@ -22,10 +22,17 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
             breadcrumbs(ui, &cwd, session.path_edit.as_mut()),
         );
     }
-    let session = app.session()?;
     ui.add_space(theme::S2);
-    keep(&mut action, toolbar(ui, session));
-
+    keep(&mut action, toolbar(ui, app.session()?));
+    {
+        let session = app.session_mut()?;
+        if let Some((og, edited)) = &mut session.rename {
+            let og = og.clone();
+            ui.add_space(theme::S2);
+            keep(&mut action, rename_bar(ui, &og, edited));
+        }
+    }
+    let session = app.session()?;
     ui.add_space(theme::S3);
     keep(&mut action, table(ui, session));
 
@@ -177,6 +184,17 @@ fn toolbar(ui: &mut Ui, session: &Session) -> Option<Action> {
         }
 
         widgets::divider_spacer(ui);
+
+        if ui
+            .add_enabled(
+                selected_count == 1,
+                egui::Button::new(format!("{} Rename", icon::PENCIL)).corner_radius(theme::R_SM),
+            )
+            .on_hover_text("Rename the selected item (F2)")
+            .clicked()
+        {
+            action = Some(Action::BeginRename);
+        }
 
         let download_label = if selected_count > 1 {
             format!("{} Download ({selected_count})", icon::DOWNLOAD)
@@ -385,4 +403,45 @@ fn header_row(ui: &mut Ui) {
         font,
         theme::TEXT_FAINT,
     );
+}
+
+fn rename_bar(ui: &mut Ui, og: &str, edited: &mut String) -> Option<Action> {
+    let mut action = None;
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icon::PENCIL).color(theme::ACCENT));
+        ui.label(
+            RichText::new(format!("{og}  \u{2192}"))
+                .color(theme::TEXT_FAINT)
+                .monospace()
+                .small(),
+        );
+
+        let field = ui.add(
+            egui::TextEdit::singleline(edited)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(280.0),
+        );
+
+        if !field.has_focus() {
+            field.request_focus();
+        }
+
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if enter && (field.has_focus() || field.lost_focus()) {
+            action = Some(Action::CommitRename);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = Some(Action::CancelRename);
+        }
+
+        if ui.small_button("Rename").clicked() {
+            action = Some(Action::CommitRename);
+        }
+        if ui.small_button("Cancel").clicked() {
+            action = Some(Action::CancelRename);
+        }
+    });
+
+    action
 }

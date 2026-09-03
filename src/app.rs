@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use crate::backend::{self, Command, Event, RemoteEntry, WorkerHandle};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
@@ -8,7 +8,7 @@ use crate::ui;
 pub struct Host {
     pub id: String,
     pub profile: ConnectionProfile,
-    pub last_used: Option<Instant>,
+    pub last_used: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,7 @@ impl Direction {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum TransferState {
+    Cancelled,
     Queued,
     Running,
     Done,
@@ -121,6 +122,7 @@ pub struct Session {
     pub loading: bool,
     pub terminal: Option<Terminal>,
     pub path_edit: Option<String>,
+    pub rename: Option<(String, String)>,
 }
 
 impl Session {
@@ -179,6 +181,9 @@ pub enum Action {
     Disconnect,
     Navigate(String),
     Refresh,
+    BeginRename,
+    CommitRename,
+    CancelRename,
     EditPath,
     CommitPath,
     CancelPath,
@@ -191,6 +196,7 @@ pub enum Action {
     DroppedFiles(Vec<std::path::PathBuf>),
     ToggleHistory,
     ClearHistory,
+    CancelTransfer(usize),
     OpenUpdate,
     DismissUpdate,
     Mkdir,
@@ -423,6 +429,13 @@ impl App {
                         }
                         done = true;
                     }
+                    Event::TransferCancelled { label } => {
+                        if let Some(record) = self.history.get_mut(job.record) {
+                            record.state = TransferState::Cancelled;
+                            logs.push((format!("Cancelled {label}"), LogLevel::Info));
+                        }
+                        done = true;
+                    }
                     Event::ConnectFailed(message) | Event::Error(message) => {
                         if let Some(record) = self.history.get_mut(job.record) {
                             record.state = TransferState::Failed;
@@ -592,6 +605,36 @@ impl App {
                 }
             }
 
+            Action::BeginRename => {
+                if let Some(session) = self.session_mut()
+                    && let Some(index) = session.selection.iter().next().copied()
+                    && let Some(entry) = session.entries.get(index)
+                {
+                    let name = entry.name.clone();
+                    session.rename = Some((name.clone(), name));
+                }
+            }
+            Action::CommitRename => {
+                if let Some(session) = self.session_mut()
+                    && let Some((from_name, to_name)) = session.rename.take()
+                {
+                    let to_name = to_name.trim().to_owned();
+
+                    if !to_name.is_empty() && to_name != from_name {
+                        let from = join_path(&session.cwd, &from_name);
+                        let to = join_path(&session.cwd, &to_name);
+                        session.worker.send(Command::Rename { from, to });
+
+                        session.refresh();
+                    }
+                }
+            }
+            Action::CancelRename => {
+                if let Some(session) = self.session_mut() {
+                    session.rename = None;
+                }
+            }
+
             Action::ClickRow(index, modifiers) => {
                 if let Some(session) = self.session_mut() {
                     session.click_row(index, modifiers);
@@ -614,6 +657,21 @@ impl App {
             Action::DroppedFiles(paths) => self.upload_paths(paths),
             Action::ToggleHistory => self.show_history = !self.show_history,
             Action::ClearHistory => self.history.clear(),
+
+            Action::CancelTransfer(record) => {
+                if let Some(job) = self.jobs.iter().find(|job| job.record == record) {
+                    job.worker.cancel();
+                } else if let Some(position) = self
+                    .queue
+                    .iter()
+                    .position(|pending| pending.record == record)
+                {
+                    self.queue.remove(position);
+                    if let Some(entry) = self.history.get_mut(record) {
+                        entry.state = TransferState::Cancelled;
+                    }
+                }
+            }
 
             Action::TrustHostKey => {
                 if let Some(pending) = self.pending_host_key.take()
@@ -713,7 +771,7 @@ impl App {
         let Some(host) = self.hosts.get_mut(index) else {
             return;
         };
-        host.last_used = Some(Instant::now());
+        host.last_used = Some(SystemTime::now());
 
         let mut profile = host.profile.clone();
         if let Some(protocol) = as_protocol {
@@ -737,6 +795,7 @@ impl App {
                 output: String::new(),
             }),
             path_edit: None,
+            rename: None,
         });
         self.active = Some(self.sessions.len() - 1);
     }
@@ -887,13 +946,16 @@ impl App {
                         session.cwd = path;
                         session.entries = entries;
                         session.path_edit = None;
+                        session.rename = None;
                         session.selection.clear();
                         session.anchor = None;
                         session.loading = false;
                     }
 
                     Event::Progress { .. } => {}
-                    Event::TransferDone { .. } => session.refresh(),
+                    Event::TransferDone { .. } | Event::TransferCancelled { .. } => {
+                        session.refresh()
+                    }
 
                     Event::ExecOutput(output) => {
                         logs.push((output, LogLevel::Info));
@@ -1024,8 +1086,16 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+pub fn relative_time_since(time: SystemTime) -> String {
+    let secs = time.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    describe_age(secs)
+}
+
 pub fn relative_time(instant: Instant) -> String {
-    let secs = instant.elapsed().as_secs();
+    describe_age(instant.elapsed().as_secs())
+}
+
+fn describe_age(secs: u64) -> String {
     match secs {
         0..=59 => "just now".to_owned(),
         60..=3599 => format!("{}m ago", secs / 60),

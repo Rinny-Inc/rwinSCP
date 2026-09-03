@@ -73,6 +73,9 @@ pub enum Event {
         total: u64,
         label: String,
     },
+    TransferCancelled {
+        label: String,
+    },
     TransferDone {
         label: String,
     },
@@ -83,18 +86,25 @@ pub enum Event {
 }
 
 pub struct WorkerHandle {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: Sender<Command>,
     rx: Receiver<Event>,
     _thread: std::thread::JoinHandle<()>,
 }
 
 impl WorkerHandle {
+    /// Asks the worker to abandon whatever transfer it is running
+    pub fn cancel(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Fire-and-forget send
     pub fn send(&self, cmd: Command) {
         self.tx.send(cmd).ok();
     }
 
-    /// Non-blocking drain of pending events.
+    /// Non-blocking drain of pending events
     pub fn try_recv(&self) -> Result<Event, std::sync::mpsc::TryRecvError> {
         self.rx.try_recv()
     }
@@ -104,16 +114,25 @@ impl WorkerHandle {
 pub fn spawn(profile: ConnectionProfile) -> WorkerHandle {
     let (tx, cmd_rx) = std::sync::mpsc::channel::<Command>();
     let (evt_tx, rx) = std::sync::mpsc::channel::<Event>();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let thread = match profile.protocol {
         Protocol::Ssh | Protocol::Sftp | Protocol::Scp => {
-            std::thread::spawn(move || ssh_sftp_scp::run(profile, cmd_rx, evt_tx))
+            let cancel = cancel.clone();
+            std::thread::spawn(move || ssh_sftp_scp::run(profile, cmd_rx, evt_tx, cancel))
         }
-        Protocol::Ftp => std::thread::spawn(move || ftp::run(profile, cmd_rx, evt_tx)),
-        Protocol::S3 => std::thread::spawn(move || s3::run(profile, cmd_rx, evt_tx)),
+        Protocol::Ftp => {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || ftp::run(profile, cmd_rx, evt_tx, cancel))
+        }
+        Protocol::S3 => {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || s3::run(profile, cmd_rx, evt_tx, cancel))
+        }
     };
 
     WorkerHandle {
+        cancel,
         tx,
         rx,
         _thread: thread,
@@ -122,3 +141,21 @@ pub fn spawn(profile: ConnectionProfile) -> WorkerHandle {
 
 /// Shared chunk size for streamed transfers
 pub(crate) const CHUNK: usize = 64 * 1024;
+pub(crate) type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
+pub(crate) fn cancelled(flag: &Cancel) -> bool {
+    flag.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub(crate) fn classify(cmd: &Command, error: anyhow::Error) -> Event {
+    let message = error.to_string();
+    let label = match cmd {
+        Command::Download { remote_path, .. } => remote_path.clone(),
+        Command::Upload { remote_path, .. } => remote_path.clone(),
+        _ => String::new(),
+    };
+
+    if message == "cancelled" {
+        Event::TransferCancelled { label }
+    } else {
+        Event::Error(message)
+    }
+}

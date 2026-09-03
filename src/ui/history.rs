@@ -57,14 +57,14 @@ fn body(app: &App, ui: &mut Ui, action: &mut Option<Action>) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for record in app.history.iter().rev() {
-                row(ui, record);
+            for (index, record) in app.history.iter().enumerate().rev() {
+                row(ui, index, record, action);
                 ui.add_space(theme::S2);
             }
         });
 }
 
-fn row(ui: &mut Ui, record: &TransferRecord) {
+fn row(ui: &mut Ui, index: usize, record: &TransferRecord, action: &mut Option<Action>) {
     let (glyph, tint) = match record.direction {
         Direction::Upload => (icon::UPLOAD, theme::ACCENT),
         Direction::Download => (icon::DOWNLOAD, theme::OK),
@@ -74,6 +74,7 @@ fn row(ui: &mut Ui, record: &TransferRecord) {
         TransferState::Running => ("running", theme::PENDING),
         TransferState::Done => ("done", theme::OK),
         TransferState::Failed => ("failed", theme::DANGER),
+        TransferState::Cancelled => ("cancelled", theme::TEXT_FAINT),
     };
 
     ui.horizontal(|ui| {
@@ -86,6 +87,14 @@ fn row(ui: &mut Ui, record: &TransferRecord) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(RichText::new(status).color(status_color).small());
+
+            if matches!(record.state, TransferState::Running | TransferState::Queued)
+                && widgets::ghost_button(ui, icon::X_SMALL, true)
+                    .on_hover_text("Cancel this transfer")
+                    .clicked()
+            {
+                *action = Some(Action::CancelTransfer(index));
+            }
         });
     });
 

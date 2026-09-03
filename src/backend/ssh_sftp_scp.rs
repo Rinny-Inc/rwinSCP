@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use ssh2::Session;
 
 use super::{CHUNK, Command, Event, RemoteEntry};
+use crate::backend::{Cancel, cancelled, classify};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -19,7 +20,12 @@ const WRITE_RETRY: Duration = Duration::from_millis(5);
 const PTY_COLS: u32 = 120;
 const PTY_ROWS: u32 = 34;
 
-pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
+pub fn run(
+    profile: ConnectionProfile,
+    cmd_rx: Receiver<Command>,
+    evt_tx: Sender<Event>,
+    cancel: Cancel,
+) {
     let session = match connect(&profile, &cmd_rx, &evt_tx) {
         Ok(session) => session,
         Err(e) => {
@@ -45,8 +51,8 @@ pub fn run(profile: ConnectionProfile, cmd_rx: Receiver<Command>, evt_tx: Sender
 
     while let Ok(cmd) = cmd_rx.recv() {
         let stop = matches!(cmd, Command::Disconnect);
-        if let Err(e) = handle(&profile, &session, sftp.as_ref(), &cmd, &evt_tx) {
-            evt_tx.send(Event::Error(e.to_string())).ok();
+        if let Err(e) = handle(&profile, &session, sftp.as_ref(), &cmd, &evt_tx, &cancel) {
+            evt_tx.send(classify(&cmd, e)).ok();
         }
         if stop {
             break;
@@ -187,6 +193,7 @@ fn handle(
     sftp: Option<&ssh2::Sftp>,
     cmd: &Command,
     evt_tx: &Sender<Event>,
+    cancel: &Cancel,
 ) -> anyhow::Result<()> {
     let need_sftp = || sftp.ok_or_else(|| anyhow::anyhow!("this operation requires SFTP"));
 
@@ -220,12 +227,12 @@ fn handle(
             let sftp = need_sftp()?;
             let stat = sftp.stat(Path::new(remote_path))?;
             if stat.is_dir() {
-                download_dir(sftp, remote_path, local_path, evt_tx)?;
+                download_dir(sftp, remote_path, local_path, evt_tx, cancel)?;
             } else {
                 let mut local = File::create(local_path)?;
                 let mut remote = sftp.open(Path::new(remote_path))?;
                 let total = remote.stat()?.size.unwrap_or(0);
-                pump(&mut remote, &mut local, total, remote_path, evt_tx)?;
+                pump(&mut remote, &mut local, total, remote_path, evt_tx, cancel)?;
             }
             evt_tx
                 .send(Event::TransferDone {
@@ -239,12 +246,12 @@ fn handle(
         } if profile.protocol == Protocol::Sftp => {
             let sftp = need_sftp()?;
             if local_path.is_dir() {
-                upload_dir(sftp, local_path, remote_path, evt_tx)?;
+                upload_dir(sftp, local_path, remote_path, evt_tx, cancel)?;
             } else {
                 let mut local = File::open(local_path)?;
                 let total = local.metadata()?.len();
                 let mut remote = sftp.create(Path::new(remote_path))?;
-                pump(&mut local, &mut remote, total, remote_path, evt_tx)?;
+                pump(&mut local, &mut remote, total, remote_path, evt_tx, cancel)?;
             }
             evt_tx
                 .send(Event::TransferDone {
@@ -261,11 +268,18 @@ fn handle(
                 Protocol::Sftp => {
                     let mut remote = need_sftp()?.open(Path::new(remote_path))?;
                     let total = remote.stat()?.size.unwrap_or(0);
-                    pump(&mut remote, &mut local, total, remote_path, evt_tx)?;
+                    pump(&mut remote, &mut local, total, remote_path, evt_tx, cancel)?;
                 }
                 Protocol::Scp => {
                     let (mut remote, stat) = session.scp_recv(Path::new(remote_path))?;
-                    pump(&mut remote, &mut local, stat.size(), remote_path, evt_tx)?;
+                    pump(
+                        &mut remote,
+                        &mut local,
+                        stat.size(),
+                        remote_path,
+                        evt_tx,
+                        cancel,
+                    )?;
                 }
                 _ => anyhow::bail!("{} cannot transfer files", profile.protocol),
             }
@@ -285,12 +299,12 @@ fn handle(
             match profile.protocol {
                 Protocol::Sftp => {
                     let mut remote = need_sftp()?.create(Path::new(remote_path))?;
-                    pump(&mut local, &mut remote, total, remote_path, evt_tx)?;
+                    pump(&mut local, &mut remote, total, remote_path, evt_tx, cancel)?;
                 }
                 Protocol::Scp => {
                     let mut remote =
                         session.scp_send(Path::new(remote_path), 0o644, total, None)?;
-                    pump(&mut local, &mut remote, total, remote_path, evt_tx)?;
+                    pump(&mut local, &mut remote, total, remote_path, evt_tx, cancel)?;
                     remote.send_eof()?;
                     remote.wait_eof()?;
                     remote.close()?;
@@ -349,6 +363,7 @@ fn upload_dir(
     local_dir: &std::path::Path,
     remote_dir: &str,
     evt_tx: &Sender<Event>,
+    cancel: &Cancel,
 ) -> anyhow::Result<()> {
     sftp.mkdir(Path::new(remote_dir), 0o755).ok();
 
@@ -362,12 +377,19 @@ fn upload_dir(
         let local_child = entry.path();
 
         if entry.file_type()?.is_dir() {
-            upload_dir(sftp, &local_child, &remote_child, evt_tx)?;
+            upload_dir(sftp, &local_child, &remote_child, evt_tx, cancel)?;
         } else {
             let mut local = File::open(&local_child)?;
             let total = local.metadata()?.len();
             let mut remote = sftp.create(Path::new(&remote_child))?;
-            pump(&mut local, &mut remote, total, &remote_child, evt_tx)?;
+            pump(
+                &mut local,
+                &mut remote,
+                total,
+                &remote_child,
+                evt_tx,
+                cancel,
+            )?;
         }
     }
 
@@ -379,6 +401,7 @@ fn download_dir(
     remote_dir: &str,
     local_dir: &std::path::Path,
     evt_tx: &Sender<Event>,
+    cancel: &Cancel,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(local_dir)?;
 
@@ -394,12 +417,19 @@ fn download_dir(
         let local_child = local_dir.join(name);
 
         if stat.is_dir() {
-            download_dir(sftp, &remote_child, &local_child, evt_tx)?;
+            download_dir(sftp, &remote_child, &local_child, evt_tx, cancel)?;
         } else {
             let mut local = File::create(&local_child)?;
             let mut remote = sftp.open(Path::new(&remote_child))?;
             let total = stat.size.unwrap_or(0);
-            pump(&mut remote, &mut local, total, &remote_child, evt_tx)?;
+            pump(
+                &mut remote,
+                &mut local,
+                total,
+                &remote_child,
+                evt_tx,
+                cancel,
+            )?;
         }
     }
 
@@ -412,11 +442,15 @@ fn pump<R: Read, W: Write>(
     total: u64,
     label: &str,
     evt_tx: &Sender<Event>,
+    cancel: &Cancel,
 ) -> anyhow::Result<()> {
     let mut buf = vec![0u8; CHUNK];
     let mut transferred = 0u64;
 
     loop {
+        if cancelled(cancel) {
+            anyhow::bail!("cancelled");
+        }
         let read = src.read(&mut buf)?;
         if read == 0 {
             break;
