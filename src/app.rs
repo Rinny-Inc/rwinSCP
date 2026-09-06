@@ -1011,7 +1011,7 @@ impl App {
 
         if busy {
             ctx.request_repaint();
-        } else {
+        } else if !self.sessions.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
     }

@@ -91,6 +91,10 @@ fn install_fonts(ctx: &egui::Context) {
         ))),
     );
 
+    for list in fonts.families.values_mut() {
+        list.retain(|name| name != "NotoEmoji-Regular" && name != "emoji-icon-font");
+    }
+
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         fonts
             .families
