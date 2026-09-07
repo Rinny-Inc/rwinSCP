@@ -101,7 +101,17 @@ pub struct TransferJob {
 }
 
 pub struct Terminal {
-    pub output: String,
+    pub lines: std::collections::VecDeque<String>,
+    pub current: String,
+}
+impl Terminal {
+    pub fn row_count(&self) -> usize {
+        self.lines.len() + 1
+    }
+
+    pub fn row(&self, index: usize) -> &str {
+        self.lines.get(index).map_or(self.current.as_str(), |l| l)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -792,7 +802,8 @@ impl App {
             anchor: None,
             loading: true,
             terminal: is_shell.then(|| Terminal {
-                output: String::new(),
+                lines: std::collections::VecDeque::new(),
+                current: String::new(),
             }),
             path_edit: None,
             rename: None,
@@ -963,7 +974,7 @@ impl App {
 
                     Event::ShellOutput(chunk) => {
                         if let Some(terminal) = &mut session.terminal {
-                            append_terminal_output(&mut terminal.output, &chunk);
+                            append_terminal_output(terminal, &chunk);
                         }
                         busy = true;
                     }
@@ -1113,9 +1124,9 @@ pub fn ellipsize(text: &str, max_chars: usize) -> String {
     }
 }
 
-const TERMINAL_CAPACITY: usize = 120_000;
+const TERMINAL_MAX_LINES: usize = 5_000;
 
-pub fn append_terminal_output(buffer: &mut String, chunk: &str) {
+pub fn append_terminal_output(terminal: &mut Terminal, chunk: &str) {
     let mut chars = chunk.chars().peekable();
 
     while let Some(c) = chars.next() {
@@ -1141,31 +1152,34 @@ pub fn append_terminal_output(buffer: &mut String, chunk: &str) {
                 }
                 _ => {}
             },
+
+            '\n' => finish_line(terminal),
+
             '\r' => {
                 if chars.peek() == Some(&'\n') {
                     chars.next();
-                    buffer.push('\n');
+                    finish_line(terminal);
                 } else {
-                    let line_start = buffer.rfind('\n').map_or(0, |i| i + 1);
-                    buffer.truncate(line_start);
+                    terminal.current.clear();
                 }
             }
             '\u{8}' => {
-                buffer.pop();
+                terminal.current.pop();
             }
 
-            c if c.is_control() && c != '\n' && c != '\t' => {}
+            c if c.is_control() && c != '\t' => {}
 
-            c => buffer.push(c),
+            c => terminal.current.push(c),
         }
     }
+}
 
-    if buffer.len() > TERMINAL_CAPACITY {
-        let excess = buffer.len() - TERMINAL_CAPACITY;
-        let cut = buffer[excess..]
-            .find('\n')
-            .map_or(excess, |i| excess + i + 1);
-        buffer.drain(..cut);
+fn finish_line(terminal: &mut Terminal) {
+    terminal
+        .lines
+        .push_back(std::mem::take(&mut terminal.current));
+    while terminal.lines.len() > TERMINAL_MAX_LINES {
+        terminal.lines.pop_front();
     }
 }
 
@@ -1198,48 +1212,61 @@ mod tests {
         assert_eq!(human_size(1_048_576), "1.0 MB");
     }
 
+    fn feed(chunk: &str) -> Terminal {
+        let mut terminal = Terminal {
+            lines: std::collections::VecDeque::new(),
+            current: String::new(),
+        };
+        append_terminal_output(&mut terminal, chunk);
+        terminal
+    }
+
     #[test]
     fn crlf_is_a_line_break_not_a_rewind() {
-        let mut buffer = String::new();
-        append_terminal_output(&mut buffer, "hello\r\nworld\r\n");
-        assert_eq!(buffer, "hello\nworld\n");
+        let terminal = feed("hello\r\nworld\r\n");
+        assert_eq!(terminal.lines, ["hello", "world"]);
+        assert_eq!(terminal.current, "");
     }
 
     #[test]
     fn lone_cr_rewrites_the_current_line() {
-        let mut buffer = String::new();
-        append_terminal_output(&mut buffer, "50%\r100%");
-        assert_eq!(buffer, "100%");
+        let terminal = feed("50%\r100%");
+        assert!(terminal.lines.is_empty());
+        assert_eq!(terminal.current, "100%");
     }
 
     #[test]
     fn escape_sequences_are_stripped() {
-        let mut buffer = String::new();
-        append_terminal_output(&mut buffer, "\u{1b}[32mgreen\u{1b}[0m\u{1b}[2Ktext");
-        assert_eq!(buffer, "greentext");
-
-        buffer.clear();
-        append_terminal_output(&mut buffer, "\u{1b}]0;window title\u{7}shell");
-        assert_eq!(buffer, "shell");
+        assert_eq!(
+            feed("\u{1b}[32mgreen\u{1b}[0m\u{1b}[2Ktext").current,
+            "greentext"
+        );
+        assert_eq!(feed("\u{1b}]0;window title\u{7}shell").current, "shell");
     }
 
     #[test]
     fn backspace_removes_the_previous_character() {
-        let mut buffer = String::new();
-        append_terminal_output(&mut buffer, "abc\u{8}d");
-        assert_eq!(buffer, "abd");
+        assert_eq!(feed("abc\u{8}d").current, "abd");
     }
 
     #[test]
-    fn terminal_buffer_stays_bounded() {
-        let mut buffer = String::new();
-        for _ in 0..5_000 {
-            append_terminal_output(&mut buffer, &format!("{}\r\n", "x".repeat(60)));
+    fn rows_include_the_line_in_progress() {
+        let terminal = feed("one\r\ntwo\r\nthr");
+        assert_eq!(terminal.row_count(), 3);
+        assert_eq!(terminal.row(0), "one");
+        assert_eq!(terminal.row(2), "thr");
+    }
+
+    #[test]
+    fn terminal_scrollback_stays_bounded() {
+        let mut terminal = Terminal {
+            lines: std::collections::VecDeque::new(),
+            current: String::new(),
+        };
+        for i in 0..(TERMINAL_MAX_LINES * 2) {
+            append_terminal_output(&mut terminal, &format!("line {i}\r\n"));
         }
-        assert!(
-            buffer.len() <= TERMINAL_CAPACITY + 200,
-            "buffer grew to {}",
-            buffer.len()
-        );
+        assert_eq!(terminal.lines.len(), TERMINAL_MAX_LINES);
+        assert!(terminal.lines.front().unwrap().starts_with("line 5000"));
     }
 }

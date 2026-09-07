@@ -42,24 +42,37 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
         .inner_margin(theme::S2 as i8);
 
     frame.show(ui, |ui| {
+        if terminal.lines.is_empty() && terminal.current.is_empty() {
+            ui.label(
+                RichText::new("Waiting for the remote shell \u{2026}")
+                    .color(theme::TEXT_FAINT)
+                    .monospace()
+                    .small(),
+            );
+            return;
+        }
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let row_height = ui.fonts_mut(|f| f.row_height(&font));
+
         egui::ScrollArea::vertical()
             .id_salt("terminal_scroll")
             .auto_shrink([false, false])
             .stick_to_bottom(true)
-            .show(ui, |ui| {
+            .show_rows(ui, row_height, terminal.row_count(), |ui, rows| {
                 ui.set_width(ui.available_width());
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    if terminal.output.is_empty() {
-                        ui.label(
-                            RichText::new("Waiting for the remote shell\u{2026}")
-                                .color(theme::TEXT_FAINT)
-                                .monospace()
-                                .small(),
-                        );
+                let last = terminal.row_count().saturating_sub(1);
+
+                for index in rows {
+                    if index == last {
+                        draw_row_with_cursor(ui, terminal.row(index), font.clone(), row_height);
                     } else {
-                        draw_output(ui, terminal.output.trim_start_matches('\n'));
+                        ui.label(
+                            RichText::new(terminal.row(index))
+                                .color(theme::TEXT)
+                                .monospace(),
+                        );
                     }
-                });
+                }
             });
     });
 
@@ -162,30 +175,21 @@ fn encode_key(key: Key, modifiers: Modifiers) -> Option<String> {
 
 const CURSOR_BLINK: f64 = 0.53;
 
-fn draw_output(ui: &mut Ui, text: &str) {
-    let font = egui::TextStyle::Monospace.resolve(ui.style());
-    let row_height = ui.fonts_mut(|f| f.row_height(&font));
-    let wrap_width = ui.available_width();
-
-    let galley = ui.fonts_mut(|f| f.layout(text.to_owned(), font.clone(), theme::TEXT, wrap_width));
-
-    let size = egui::vec2(galley.size().x.max(1.0), galley.size().y + row_height);
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-
-    let end = galley.end();
-    let caret = galley.pos_from_cursor(end).min;
+fn draw_row_with_cursor(ui: &mut Ui, text: &str, font: egui::FontId, row_height: f32) {
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT));
+    let advance = ui.fonts_mut(|f| f.glyph_width(&font, ' '));
+    let width = galley.size().x + advance.max(2.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::hover());
+    let caret = rect.min + egui::vec2(galley.size().x, 0.0);
     ui.painter().galley(rect.min, galley, theme::TEXT);
 
     let time = ui.input(|i| i.time);
-    let visible = (time / CURSOR_BLINK) as i64 & 1 == 0;
-    if visible {
-        let advance = ui.fonts_mut(|f| f.glyph_width(&font, ' '));
-        let cursor_rect = egui::Rect::from_min_size(
-            rect.min + caret.to_vec2(),
-            egui::vec2(advance.max(2.0), row_height),
+    if (time / CURSOR_BLINK) as i64 & 1 == 0 {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(caret, egui::vec2(advance.max(2.0), row_height)),
+            1,
+            theme::tint(theme::ACCENT, 200),
         );
-        ui.painter()
-            .rect_filled(cursor_rect, 1, theme::tint(theme::ACCENT, 200));
     }
 
     ui.ctx()
