@@ -100,9 +100,11 @@ pub struct TransferJob {
     seen: std::collections::HashMap<String, u64>,
 }
 
+#[derive(Default)]
 pub struct Terminal {
     pub lines: std::collections::VecDeque<String>,
     pub current: String,
+    pending_cr: bool,
 }
 impl Terminal {
     pub fn row_count(&self) -> usize {
@@ -801,10 +803,7 @@ impl App {
             selection: HashSet::new(),
             anchor: None,
             loading: true,
-            terminal: is_shell.then(|| Terminal {
-                lines: std::collections::VecDeque::new(),
-                current: String::new(),
-            }),
+            terminal: is_shell.then(|| Terminal::default()),
             path_edit: None,
             rename: None,
         });
@@ -1129,16 +1128,20 @@ const TERMINAL_MAX_LINES: usize = 5_000;
 pub fn append_terminal_output(terminal: &mut Terminal, chunk: &str) {
     let mut chars = chunk.chars().peekable();
 
+    if terminal.pending_cr {
+        terminal.pending_cr = false;
+        if chars.peek() == Some(&'\n') {
+            chars.next();
+            finish_line(terminal);
+        } else {
+            terminal.current.clear();
+        }
+    }
+
     while let Some(c) = chars.next() {
         match c {
             '\u{1B}' => match chars.next() {
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7E}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
+                Some('[') => control_sequence(terminal, &mut chars),
                 Some(']') => {
                     while let Some(c) = chars.next() {
                         if c == '\u{7}' {
@@ -1155,14 +1158,14 @@ pub fn append_terminal_output(terminal: &mut Terminal, chunk: &str) {
 
             '\n' => finish_line(terminal),
 
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
+            '\r' => match chars.peek() {
+                Some('\n') => {
                     chars.next();
                     finish_line(terminal);
-                } else {
-                    terminal.current.clear();
                 }
-            }
+                None => terminal.pending_cr = true,
+                _ => terminal.current.clear(),
+            },
             '\u{8}' => {
                 terminal.current.pop();
             }
@@ -1180,6 +1183,33 @@ fn finish_line(terminal: &mut Terminal) {
         .push_back(std::mem::take(&mut terminal.current));
     while terminal.lines.len() > TERMINAL_MAX_LINES {
         terminal.lines.pop_front();
+    }
+}
+
+fn control_sequence(terminal: &mut Terminal, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    let mut params = String::new();
+
+    for c in chars.by_ref() {
+        if ('\u{40}'..='\u{7E}').contains(&c) {
+            let n: usize = params
+                .split(';')
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(1);
+
+            match c {
+                'A' => {
+                    terminal.current.clear();
+                    for _ in 0..n.min(terminal.lines.len()) {
+                        terminal.lines.pop_back();
+                    }
+                }
+                'K' | 'G' => terminal.current.clear(),
+                _ => {}
+            }
+            return;
+        }
+        params.push(c);
     }
 }
 
@@ -1213,10 +1243,7 @@ mod tests {
     }
 
     fn feed(chunk: &str) -> Terminal {
-        let mut terminal = Terminal {
-            lines: std::collections::VecDeque::new(),
-            current: String::new(),
-        };
+        let mut terminal = Terminal::default();
         append_terminal_output(&mut terminal, chunk);
         terminal
     }
@@ -1236,11 +1263,8 @@ mod tests {
     }
 
     #[test]
-    fn escape_sequences_are_stripped() {
-        assert_eq!(
-            feed("\u{1b}[32mgreen\u{1b}[0m\u{1b}[2Ktext").current,
-            "greentext"
-        );
+    fn colour_sequences_are_stripped() {
+        assert_eq!(feed("\u{1b}[32mgreen\u{1b}[0m text").current, "green text");
         assert_eq!(feed("\u{1b}]0;window title\u{7}shell").current, "shell");
     }
 
@@ -1259,14 +1283,50 @@ mod tests {
 
     #[test]
     fn terminal_scrollback_stays_bounded() {
-        let mut terminal = Terminal {
-            lines: std::collections::VecDeque::new(),
-            current: String::new(),
-        };
+        let mut terminal = Terminal::default();
         for i in 0..(TERMINAL_MAX_LINES * 2) {
             append_terminal_output(&mut terminal, &format!("line {i}\r\n"));
         }
         assert_eq!(terminal.lines.len(), TERMINAL_MAX_LINES);
         assert!(terminal.lines.front().unwrap().starts_with("line 5000"));
+    }
+}
+
+#[cfg(test)]
+mod progress_output {
+    use super::*;
+
+    #[test]
+    fn carriage_return_split_across_chunks() {
+        let mut terminal = Terminal::default();
+        append_terminal_output(&mut terminal, "hello\r");
+        append_terminal_output(&mut terminal, "\nworld\r\n");
+        assert_eq!(terminal.lines, ["hello", "world"]);
+    }
+
+    #[test]
+    fn single_line_progress_overwrites() {
+        let mut terminal = Terminal::default();
+        for pct in [10, 20, 30] {
+            append_terminal_output(&mut terminal, &format!("\u{1b}[2K\rProgress: {pct}%"));
+        }
+        assert!(terminal.lines.is_empty());
+        assert_eq!(terminal.current, "Progress: 30%");
+    }
+
+    #[test]
+    fn multi_line_progress_overwrites() {
+        let mut terminal = Terminal::default();
+        append_terminal_output(&mut terminal, "a: 10%\r\nb: 10%\r\n");
+        append_terminal_output(&mut terminal, "\u{1b}[2Aa: 20%\r\nb: 20%\r\n");
+        assert_eq!(terminal.lines, ["a: 20%", "b: 20%"]);
+    }
+
+    #[test]
+    fn cursor_up_past_the_top_is_clamped() {
+        let mut terminal = Terminal::default();
+        append_terminal_output(&mut terminal, "only\r\n");
+        append_terminal_output(&mut terminal, "\u{1b}[99Areplaced\r\n");
+        assert_eq!(terminal.lines, ["replaced"]);
     }
 }
