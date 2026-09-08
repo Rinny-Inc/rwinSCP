@@ -1,6 +1,6 @@
 use egui::{Align2, CornerRadius, FontId, RichText, Sense, Ui, Vec2};
 
-use crate::app::{Action, App, Session, Status, human_size, parent_path};
+use crate::app::{Action, App, Session, Status, human_size};
 use crate::icon;
 use crate::theme;
 use crate::ui::{keep, widgets};
@@ -156,18 +156,6 @@ fn toolbar(ui: &mut Ui, session: &Session) -> Option<Action> {
     let selected_count = session.selection.len();
 
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                session.cwd != "/",
-                egui::Button::new(format!("{} Up", icon::ARROW_UP)).corner_radius(theme::R_SM),
-            )
-            .clicked()
-        {
-            action = Some(Action::Navigate(parent_path(&session.cwd)));
-        }
-
-        widgets::divider_spacer(ui);
-
         if ui
             .add_enabled(
                 selected_count == 1,

@@ -803,7 +803,7 @@ impl App {
             selection: HashSet::new(),
             anchor: None,
             loading: true,
-            terminal: is_shell.then(|| Terminal::default()),
+            terminal: is_shell.then(Terminal::default),
             path_edit: None,
             rename: None,
         });
@@ -1073,14 +1073,6 @@ pub fn join_path(dir: &str, name: &str) -> String {
     }
 }
 
-pub fn parent_path(path: &str) -> String {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        None | Some(0) => "/".to_owned(),
-        Some(index) => trimmed[..index].to_owned(),
-    }
-}
-
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
@@ -1224,14 +1216,6 @@ mod tests {
         assert_eq!(join_path("/", "file.txt"), "/file.txt");
         assert_eq!(join_path("", "file.txt"), "/file.txt");
         assert_eq!(join_path("/a", "/b"), "/a/b");
-    }
-
-    #[test]
-    fn parent_path_saturates_at_root() {
-        assert_eq!(parent_path("/home/user/docs"), "/home/user");
-        assert_eq!(parent_path("/home"), "/");
-        assert_eq!(parent_path("/"), "/");
-        assert_eq!(parent_path("/home/user/"), "/home");
     }
 
     #[test]

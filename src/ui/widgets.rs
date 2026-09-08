@@ -178,6 +178,7 @@ pub fn divider(ui: &mut Ui) {
     ui.painter().rect_filled(rect, 0, theme::BORDER);
 }
 
+#[allow(dead_code, reason = "could be used later on if not it'll be removed")]
 pub fn divider_spacer(ui: &mut Ui) {
     ui.add_space(theme::S1);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 18.0), Sense::hover());

@@ -16,7 +16,10 @@ pub const PENCIL: &str = "\u{E3B4}";
 pub const TRASH: &str = "\u{E4A6}";
 pub const ARROW_RIGHT: &str = "\u{E06C}";
 pub const ARROW_LEFT: &str = "\u{E058}";
+
+#[allow(dead_code, reason = "part of the icons palette")]
 pub const ARROW_UP: &str = "\u{E08E}";
+
 pub const ARROW_CLOCKWISE: &str = "\u{E036}";
 pub const CARET_RIGHT: &str = "\u{E13A}";
 
