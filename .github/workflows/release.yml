@@ -241,7 +241,11 @@ jobs:
 
           rm -rf package
 
-          mkdir -p package/DEBIAN
+          mkdir -p \
+            package/DEBIAN \
+            package/usr/bin \
+            package/usr/share/applications \
+            package/usr/share/icons/hicolor/256x256/apps
 
           install -Dm755 \
             "target/${{ matrix.target }}/release/${APP_NAME}" \
@@ -263,8 +267,7 @@ jobs:
            SCP, FTP and S3.
           EOF
 
-          cat > \
-            "package/usr/share/applications/${APP_NAME}.desktop" <<EOF
+          cat > "package/usr/share/applications/${APP_NAME}.desktop" <<EOF
           [Desktop Entry]
           Version=1.0
           Type=Application
@@ -360,15 +363,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install innosetup -y --no-progress
-
+          # Inno Setup is usually already available on the GitHub runner.
+          # Only install it if ISCC.exe cannot be found.
           $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
 
           if (-not $iscc) {
-            throw "Inno Setup Compiler (ISCC.exe) was not found."
+            choco install innosetup -y --no-progress
           }
 
-          iscc.exe /?
+          $iscc = Get-Command iscc.exe -ErrorAction Stop
+
+          Write-Host "Inno Setup found at:"
+          Write-Host $iscc.Source
+
+          # Do not run `iscc.exe /?` because it can return exit code 1.
+          & $iscc.Source /VERSION
 
       - name: Create Windows installer script
         if: runner.os == 'Windows'
@@ -434,14 +443,41 @@ jobs:
         run: |
           $Version = $env:GITHUB_REF_NAME -replace '^v', ''
 
-          iscc.exe installer.iss
+          # Verify that the Rust executable exists before compiling.
+          $Executable = `
+            "target\x86_64-pc-windows-msvc\release\rwinSCP.exe"
+
+          if (-not (Test-Path $Executable)) {
+            throw "Windows executable not found: $Executable"
+          }
+
+          Write-Host "Compiling Windows installer..."
+
+          $iscc = Get-Command iscc.exe -ErrorAction Stop
+
+          & $iscc.Source installer.iss
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
+          }
 
           $Installer = `
             "installer-output\rwinSCP-$Version-windows-x64-setup.exe"
 
           if (-not (Test-Path $Installer)) {
-            throw "Windows installer was not created."
+            throw "Windows installer was not created: $Installer"
           }
+
+          Write-Host "Windows installer successfully created:"
+          Get-Item $Installer
+
+      - name: Upload Windows installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          path: installer-output/*.exe
+          if-no-files-found: error
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7
