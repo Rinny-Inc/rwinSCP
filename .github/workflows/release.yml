@@ -1,167 +1,547 @@
-name: release
+name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  APP_NAME: rwinSCP
 
 jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+
     strategy:
       fail-fast: false
+
       matrix:
         include:
+          # macOS Apple Silicon
           - os: macos-latest
             target: aarch64-apple-darwin
             label: macOS (Apple Silicon)
+            artifact: macos-arm64
+
+          # macOS Intel
           - os: macos-15-intel
             target: x86_64-apple-darwin
             label: macOS (Intel)
-          - os: ubuntu-latest
+            artifact: macos-x64
+
+          # Linux
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: Linux (x86_64)
+            artifact: linux-x64
+
+          # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows (x86_64)
+            artifact: windows-x64
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libssl-dev libssh2-1-dev cmake \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libgl1-mesa-dev libxkbcommon-dev libwayland-dev
-
-      - uses: Swatinem/rust-cache@v2
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Bundle macOS .app
-        if: runner.os == 'macOS'
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
-          APP="rwinSCP.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp "target/${{ matrix.target }}/release/rwinSCP" "$APP/Contents/MacOS/"
+          sudo apt-get update
 
-          mkdir icon.iconset
-          for size in 16 32 128 256 512; do
-            sips -z $size $size assets/icon.png --out "icon.iconset/icon_${size}x${size}.png"
-            sips -z $((size * 2)) $((size * 2)) assets/icon.png \
-              --out "icon.iconset/icon_${size}x${size}@2x.png"
-          done
-          iconutil -c icns icon.iconset -o "$APP/Contents/Resources/rwinSCP.icns"
+          sudo apt-get install -y \
+            pkg-config \
+            libssl-dev \
+            libssh2-1-dev \
+            cmake \
+            dpkg-dev \
+            fakeroot \
+            libfuse2 \
+            file \
+            curl
 
-          cat > "$APP/Contents/Info.plist" <<'PLIST'
+      - name: Build release binary
+        shell: bash
+        run: |
+          cargo build \
+            --release \
+            --target ${{ matrix.target }}
+
+      - name: Create macOS application bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP="${APP_NAME}.app"
+
+          rm -rf "$APP"
+          rm -rf icon.iconset
+          rm -rf dmg
+
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          cp \
+            "target/${{ matrix.target }}/release/${APP_NAME}" \
+            "$APP/Contents/MacOS/${APP_NAME}"
+
+          chmod +x "$APP/Contents/MacOS/${APP_NAME}"
+
+          # --------------------------------------------------------
+          # Generate macOS ICNS icon
+          # --------------------------------------------------------
+
+          mkdir -p icon.iconset
+
+          sips -z 16 16 assets/icon.png \
+            --out icon.iconset/icon_16x16.png
+
+          sips -z 32 32 assets/icon.png \
+            --out icon.iconset/icon_16x16@2x.png
+
+          sips -z 32 32 assets/icon.png \
+            --out icon.iconset/icon_32x32.png
+
+          sips -z 64 64 assets/icon.png \
+            --out icon.iconset/icon_32x32@2x.png
+
+          sips -z 128 128 assets/icon.png \
+            --out icon.iconset/icon_128x128.png
+
+          sips -z 256 256 assets/icon.png \
+            --out icon.iconset/icon_128x128@2x.png
+
+          sips -z 256 256 assets/icon.png \
+            --out icon.iconset/icon_256x256.png
+
+          sips -z 512 512 assets/icon.png \
+            --out icon.iconset/icon_256x256@2x.png
+
+          sips -z 512 512 assets/icon.png \
+            --out icon.iconset/icon_512x512.png
+
+          sips -z 1024 1024 assets/icon.png \
+            --out icon.iconset/icon_512x512@2x.png
+
+          iconutil \
+            -c icns \
+            icon.iconset \
+            -o "$APP/Contents/Resources/${APP_NAME}.icns"
+
+          # --------------------------------------------------------
+          # macOS application metadata
+          # --------------------------------------------------------
+
+          cat > "$APP/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
             "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+
           <plist version="1.0">
           <dict>
-            <key>CFBundleName</key><string>rwinSCP</string>
-            <key>CFBundleDisplayName</key><string>rwinSCP</string>
-            <key>CFBundleIdentifier</key><string>com.rinny.rwinscp</string>
-            <key>CFBundleExecutable</key><string>rwinSCP</string>
-            <key>CFBundleIconFile</key><string>rwinSCP.icns</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>0.1.0</string>
-            <key>NSHighResolutionCapable</key><true/>
+
+              <key>CFBundleName</key>
+              <string>${APP_NAME}</string>
+
+              <key>CFBundleDisplayName</key>
+              <string>${APP_NAME}</string>
+
+              <key>CFBundleIdentifier</key>
+              <string>com.rinny.rwinscp</string>
+
+              <key>CFBundleExecutable</key>
+              <string>${APP_NAME}</string>
+
+              <key>CFBundleIconFile</key>
+              <string>${APP_NAME}.icns</string>
+
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+
+              <key>CFBundleVersion</key>
+              <string>${GITHUB_RUN_NUMBER}</string>
+
+              <key>LSMinimumSystemVersion</key>
+              <string>11.0</string>
+
+              <key>NSHighResolutionCapable</key>
+              <true/>
+
           </dict>
           </plist>
-          PLIST
+          EOF
 
-          codesign --force --sign - "$APP/Contents/MacOS/rwinSCP"
-          codesign --force --sign - "$APP"
-          codesign --verify --strict --verbose=2 "$APP"
+          # --------------------------------------------------------
+          # Ad-hoc signing
+          # --------------------------------------------------------
 
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$APP" "rwinSCP-${{ matrix.target }}.zip"
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            "$APP"
 
-          tar -czf "rwinSCP-${{ matrix.target }}-bin.tar.gz" \
-            -C "target/${{ matrix.target }}/release" rwinSCP
-      - name: Package Linux binary
-        if: runner.os == 'Linux'
+          codesign \
+            --verify \
+            --deep \
+            --strict \
+            --verbose=2 \
+            "$APP"
+
+      - name: Create macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
         run: |
-          tar -czf "rwinSCP-${{ matrix.target }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" rwinSCP
+          rm -rf dmg
+          mkdir -p dmg
 
-      - name: Package Windows binary
+          cp -R "${APP_NAME}.app" dmg/
+
+          ln -s /Applications dmg/Applications
+
+          hdiutil create \
+            -volname "${APP_NAME}" \
+            -srcfolder dmg \
+            -ov \
+            -format UDZO \
+            "${APP_NAME}-${{ matrix.artifact }}.dmg"
+
+      - name: Verify macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test -f "${APP_NAME}-${{ matrix.artifact }}.dmg"
+
+      - name: Create Linux DEB package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          rm -rf package
+
+          mkdir -p package/DEBIAN
+
+          install -Dm755 \
+            "target/${{ matrix.target }}/release/${APP_NAME}" \
+            "package/usr/bin/${APP_NAME}"
+
+          install -Dm644 \
+            assets/icon.png \
+            "package/usr/share/icons/hicolor/256x256/apps/${APP_NAME}.png"
+
+          cat > package/DEBIAN/control <<EOF
+          Package: rwinscp
+          Version: ${VERSION}
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Rinny Inc
+          Description: rwinSCP
+           Secure file transfer client supporting SFTP, SSH,
+           SCP, FTP and S3.
+          EOF
+
+          cat > \
+            "package/usr/share/applications/${APP_NAME}.desktop" <<EOF
+          [Desktop Entry]
+          Version=1.0
+          Type=Application
+          Name=${APP_NAME}
+          Comment=Secure file transfer client
+          Exec=/usr/bin/${APP_NAME}
+          Icon=${APP_NAME}
+          Terminal=false
+          Categories=Network;FileTransfer;
+          EOF
+
+          dpkg-deb \
+            --build \
+            --root-owner-group \
+            package \
+            "${APP_NAME}-${VERSION}-linux-x64.deb"
+
+      - name: Verify Linux DEB
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dpkg-deb \
+            --info \
+            "${APP_NAME}-${GITHUB_REF_NAME#v}-linux-x64.deb"
+
+      - name: Create Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          rm -rf AppDir
+          rm -f appimagetool
+
+          mkdir -p AppDir/usr/bin
+
+          install -Dm755 \
+            "target/${{ matrix.target }}/release/${APP_NAME}" \
+            "AppDir/usr/bin/${APP_NAME}"
+
+          install -Dm644 \
+            assets/icon.png \
+            "AppDir/${APP_NAME}.png"
+
+          cat > "AppDir/${APP_NAME}.desktop" <<EOF
+          [Desktop Entry]
+          Version=1.0
+          Type=Application
+          Name=${APP_NAME}
+          Comment=Secure file transfer client
+          Exec=${APP_NAME}
+          Icon=${APP_NAME}
+          Terminal=false
+          Categories=Network;FileTransfer;
+          EOF
+
+          cat > AppDir/AppRun <<EOF
+          #!/bin/sh
+
+          HERE="\$(dirname "\$(readlink -f "\$0")")"
+
+          exec "\$HERE/usr/bin/${APP_NAME}" "\$@"
+          EOF
+
+          chmod +x AppDir/AppRun
+
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --output appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+
+          chmod +x appimagetool
+
+          ARCH=x86_64 \
+          VERSION="${VERSION}" \
+          ./appimagetool \
+            AppDir \
+            "${APP_NAME}-${VERSION}-linux-x64.AppImage"
+
+          chmod +x \
+            "${APP_NAME}-${VERSION}-linux-x64.AppImage"
+
+      - name: Verify Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test -f \
+            "${APP_NAME}-${GITHUB_REF_NAME#v}-linux-x64.AppImage"
+
+      - name: Install Inno Setup
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/rwinSCP.exe" `
-            -DestinationPath "rwinSCP-${{ matrix.target }}.zip"
+          choco install innosetup -y --no-progress
 
-      - uses: actions/upload-artifact@v7
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+
+          if (-not $iscc) {
+            throw "Inno Setup Compiler (ISCC.exe) was not found."
+          }
+
+          iscc.exe /?
+
+      - name: Create Windows installer script
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = $env:GITHUB_REF_NAME -replace '^v', ''
+
+          @"
+          #define MyAppName "rwinSCP"
+          #define MyAppVersion "$Version"
+          #define MyAppPublisher "Rinny Inc"
+          #define MyAppURL "https://github.com/Rinny-Inc/rwinSCP"
+          #define MyAppExeName "rwinSCP.exe"
+
+          [Setup]
+          AppId={{8F4D4F1B-5B8C-4D14-BB15-4C6D9D4D8B32}
+          AppName={#MyAppName}
+          AppVersion={#MyAppVersion}
+          AppPublisher={#MyAppPublisher}
+          AppPublisherURL={#MyAppURL}
+          AppSupportURL={#MyAppURL}
+          AppUpdatesURL={#MyAppURL}
+
+          DefaultDirName={autopf}\{#MyAppName}
+          DefaultGroupName={#MyAppName}
+
+          DisableProgramGroupPage=yes
+
+          OutputDir=installer-output
+          OutputBaseFilename=rwinSCP-$Version-windows-x64-setup
+
+          Compression=lzma2
+          SolidCompression=yes
+
+          WizardStyle=modern
+
+          UninstallDisplayName={#MyAppName}
+          UninstallDisplayIcon={app}\{#MyAppExeName}
+
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Languages]
+          Name: "english"; MessagesFile: "compiler:Default.isl"
+
+          [Tasks]
+          Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+
+          [Files]
+          Source: "target\x86_64-pc-windows-msvc\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+          Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+          "@ | Set-Content -Path installer.iss -Encoding UTF8
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = $env:GITHUB_REF_NAME -replace '^v', ''
+
+          iscc.exe installer.iss
+
+          $Installer = `
+            "installer-output\rwinSCP-$Version-windows-x64-setup.exe"
+
+          if (-not (Test-Path $Installer)) {
+            throw "Windows installer was not created."
+          }
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
         with:
-          name: rwinSCP-${{ matrix.target }}
+          name: ${{ matrix.artifact }}
           path: |
-            rwinSCP-*.zip
-            rwinSCP-*.tar.gz
+            *.dmg
+            *.deb
+            *.AppImage
+            installer-output/*.exe
           if-no-files-found: error
 
   release:
+    name: Create GitHub Release
+
     needs: build
+
     runs-on: ubuntu-latest
+
     if: startsWith(github.ref, 'refs/tags/v')
+
     permissions:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v8
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v3
+      - name: List release files
+        shell: bash
+        run: |
+          echo "Generated release files:"
+          find artifacts -type f -print
+
+      - name: Verify all release formats
+        shell: bash
+        run: |
+          ARM_DMG=$(find artifacts -name '*macos-arm64.dmg' -print -quit)
+          INTEL_DMG=$(find artifacts -name '*macos-x64.dmg' -print -quit)
+          DEB=$(find artifacts -name '*.deb' -print -quit)
+          APPIMAGE=$(find artifacts -name '*.AppImage' -print -quit)
+          WINDOWS=$(find artifacts -name '*windows-x64-setup.exe' -print -quit)
+
+          test -n "$ARM_DMG"
+          test -n "$INTEL_DMG"
+          test -n "$DEB"
+          test -n "$APPIMAGE"
+          test -n "$WINDOWS"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
         with:
-          files: |
-            artifacts/rwinSCP-*.zip
-            artifacts/rwinSCP-*.tar.gz
           generate_release_notes: true
           draft: true
+
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.exe
+
           body: |
             ## Downloads
 
-            | Platform | File |
+            | Platform | Format |
             | --- | --- |
-            | macOS (Apple Silicon) | `rwinSCP-aarch64-apple-darwin.zip` (app bundle) or `-bin.tar.gz` (executable) |
-            | macOS (Intel) | `rwinSCP-x86_64-apple-darwin.zip` (app bundle) or `-bin.tar.gz` (executable) |
-            | Linux (x86_64) | `rwinSCP-x86_64-unknown-linux-gnu.tar.gz` |
-            | Windows (x86_64) | `rwinSCP-x86_64-pc-windows-msvc.zip` |
+            | macOS (Apple Silicon) | `.dmg` (ARM64) |
+            | macOS (Intel) | `.dmg` (x64) |
+            | Windows | `.exe` installer (x64) |
+            | Linux | `.deb` / `.AppImage` |
 
-            ### macOS: first run
+            ### Windows
 
-            These builds are signed ad-hoc, not with a paid Developer ID, so
-            macOS quarantines them on download. Clear the quarantine flag:
+            Download and run the `.exe` installer. It includes:
 
-            ```sh
-            xattr -dr com.apple.quarantine /Applications/rwinSCP.app
-            ```
+            - Start Menu integration
+            - Optional Desktop shortcut
+            - Standard Windows uninstaller
+            - 64-bit installation
 
-            Or right-click the app and choose **Open**, then confirm.
+            ### macOS
 
-            The bare executable needs the same treatment:
-
-            ```sh
-            xattr -d com.apple.quarantine ./rwinSCP && chmod +x ./rwinSCP
-            ```
+            The application is currently ad-hoc signed. Depending on your
+            macOS security settings, you may need to explicitly allow the
+            application to open.
 
             ### Linux
 
-            Needs `libssh2` and OpenSSL at runtime:
-            `sudo apt install libssh2-1 openssl`
+            **Debian / Ubuntu:**
+
+            ```sh
+            sudo apt install ./rwinSCP-*.deb
+            ```
+
+            **AppImage:**
+
+            ```sh
+            chmod +x rwinSCP-*.AppImage
+            ./rwinSCP-*.AppImage
+            ```
