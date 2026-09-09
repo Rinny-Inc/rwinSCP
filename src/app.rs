@@ -48,6 +48,10 @@ pub struct TransferRecord {
     pub total: Option<u64>,
     pub state: TransferState,
     pub at: Instant,
+    rate: f64,
+    eta: Option<u64>,
+    sampled_at: Instant,
+    sampled_bytes: u64,
 }
 
 impl TransferRecord {
@@ -60,24 +64,40 @@ impl TransferRecord {
     }
 
     pub fn bytes_per_second(&self) -> f64 {
-        let seconds = self.at.elapsed().as_secs_f64();
-        if seconds <= 0.0 {
-            return 0.0;
-        }
-        self.bytes as f64 / seconds
+        self.rate
     }
 
     pub fn eta_seconds(&self) -> Option<u64> {
-        if self.state != TransferState::Running {
-            return None;
+        if self.state == TransferState::Running {
+            self.eta
+        } else {
+            None
         }
+    }
 
-        let total = self.total?;
-        let rate = self.bytes_per_second();
-        if rate <= 0.0 || self.bytes >= total {
-            return None;
+    fn sample_rate(&mut self) {
+        let elapsed = self.sampled_at.elapsed();
+        if elapsed < RATE_SAMPLE_INTERVAL {
+            return;
         }
-        Some(((total - self.bytes) as f64 / rate).ceil() as u64)
+        let moved = self.bytes.saturating_sub(self.sampled_bytes) as f64;
+        let instant = moved / elapsed.as_secs_f64();
+
+        self.rate = if self.rate <= 0.0 {
+            instant
+        } else {
+            self.rate * (1.0 - RATE_SMOOTHING) + instant * RATE_SMOOTHING
+        };
+
+        self.sampled_at = Instant::now();
+        self.sampled_bytes = self.bytes;
+
+        self.eta = match self.total {
+            Some(total) if self.rate > 0.0 && self.bytes < total => {
+                Some(((total - self.bytes) as f64 / self.rate).ceil() as u64)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -270,6 +290,8 @@ impl Default for App {
 
 const LOG_CAPACITY: usize = 500;
 pub const HISTORY_CAPACITY: usize = 75;
+const RATE_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const RATE_SMOOTHING: f64 = 0.25;
 pub const MAX_CONCURRENT_TRANSFERS: usize = 3;
 
 impl App {
@@ -365,6 +387,10 @@ impl App {
             total,
             state: TransferState::Queued,
             at: Instant::now(),
+            rate: 0.0,
+            eta: None,
+            sampled_at: Instant::now(),
+            sampled_bytes: 0,
         });
         if self.history.len() > HISTORY_CAPACITY {
             let excess = self.history.len() - HISTORY_CAPACITY;
@@ -399,8 +425,12 @@ impl App {
                 seen: std::collections::HashMap::new(),
             };
             if let Some(record) = self.history.get_mut(pending.record) {
+                let now = Instant::now();
+
                 record.state = TransferState::Running;
-                record.at = Instant::now();
+                record.sampled_at = now;
+                record.sampled_bytes = 0;
+                record.at = now;
             }
             job.worker.send(pending.command);
             self.jobs.push(job);
@@ -467,6 +497,7 @@ impl App {
                     record.bytes = moved;
                     busy = true;
                 }
+                record.sample_rate();
             }
 
             if done {

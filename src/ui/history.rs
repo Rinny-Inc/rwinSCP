@@ -106,7 +106,7 @@ fn row(ui: &mut Ui, index: usize, record: &TransferRecord, action: &mut Option<A
         ui.add(
             bar.fill(theme::ACCENT)
                 .corner_radius(theme::R_SM)
-                .desired_height(8.0),
+                .desired_height(12.0),
         );
     }
 
