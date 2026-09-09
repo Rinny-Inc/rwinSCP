@@ -363,21 +363,24 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Inno Setup is usually already available on the GitHub runner.
-          # Only install it if ISCC.exe cannot be found.
-          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 
           if (-not $iscc) {
+            Write-Host "Inno Setup was not found. Installing it..."
+
             choco install innosetup -y --no-progress
+
+            $iscc = Get-Command ISCC.exe -ErrorAction Stop
           }
 
-          $iscc = Get-Command iscc.exe -ErrorAction Stop
-
-          Write-Host "Inno Setup found at:"
+          Write-Host "Inno Setup compiler found:"
           Write-Host $iscc.Source
 
-          # Do not run `iscc.exe /?` because it can return exit code 1.
-          & $iscc.Source /VERSION
+          if (-not (Test-Path $iscc.Source)) {
+            throw "ISCC.exe exists in PATH but the executable could not be found."
+          }
+
+          Write-Host "Inno Setup is ready."
 
       - name: Create Windows installer script
         if: runner.os == 'Windows'
@@ -443,7 +446,6 @@ jobs:
         run: |
           $Version = $env:GITHUB_REF_NAME -replace '^v', ''
 
-          # Verify that the Rust executable exists before compiling.
           $Executable = `
             "target\x86_64-pc-windows-msvc\release\rwinSCP.exe"
 
@@ -451,9 +453,10 @@ jobs:
             throw "Windows executable not found: $Executable"
           }
 
-          Write-Host "Compiling Windows installer..."
+          $iscc = Get-Command ISCC.exe -ErrorAction Stop
 
-          $iscc = Get-Command iscc.exe -ErrorAction Stop
+          Write-Host "Compiling installer with:"
+          Write-Host $iscc.Source
 
           & $iscc.Source installer.iss
 
@@ -468,7 +471,7 @@ jobs:
             throw "Windows installer was not created: $Installer"
           }
 
-          Write-Host "Windows installer successfully created:"
+          Write-Host "Installer successfully created:"
           Get-Item $Installer
 
       - name: Upload Windows installer
