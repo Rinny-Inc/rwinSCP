@@ -474,14 +474,6 @@ jobs:
           Write-Host "Installer successfully created:"
           Get-Item $Installer
 
-      - name: Upload Windows installer
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-x64
-          path: installer-output/*.exe
-          if-no-files-found: error
-
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7
         with:
