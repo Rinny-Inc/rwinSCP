@@ -7,8 +7,9 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crate::connection::{ConnectionProfile, Protocol};
 
-/// Shared chunk size for streamed transfers
-const CHUNK: usize = 64 * 1024;
+/// Bytes moved per read/write step
+const CHUNK: usize = 256 * 1024;
+
 pub const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
