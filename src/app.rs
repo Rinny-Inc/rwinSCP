@@ -439,6 +439,7 @@ impl App {
 
     fn poll_transfers(&mut self, ctx: &egui::Context) {
         let mut finished_indices = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
         let mut logs: Vec<(String, LogLevel)> = Vec::new();
         let mut busy = false;
 
@@ -467,6 +468,9 @@ impl App {
                         if let Some(record) = self.history.get_mut(job.record) {
                             record.bytes = job.seen.values().sum();
                             record.state = TransferState::Done;
+                            if record.direction == Direction::Upload {
+                                touched.push(remote_parent(&record.label));
+                            }
                             logs.push((format!("Finished {label}"), LogLevel::Success));
                         }
                         done = true;
@@ -513,10 +517,18 @@ impl App {
             self.push_log(text, level);
         }
 
+        if !touched.is_empty() {
+            for session in &mut self.sessions {
+                if session.profile.protocol.browsable() && touched.contains(&session.cwd) {
+                    session.refresh();
+                }
+            }
+        }
+
         self.start_queued();
 
         if busy || !self.jobs.is_empty() {
-            ctx.request_repaint();
+            ctx.request_repaint_after(crate::backend::PROGRESS_INTERVAL);
         }
     }
 
@@ -735,7 +747,11 @@ impl App {
 
             Action::OpenUpdate => {
                 if let Some(update) = &self.update_available {
-                    crate::update::open_in_browser(&update.url);
+                    let target = update
+                        .asset
+                        .as_ref()
+                        .map_or(update.url.as_str(), |asset| asset.url.as_str());
+                    crate::update::open_in_browser(target);
                 }
             }
             Action::DismissUpdate => {
@@ -1090,6 +1106,14 @@ fn local_size(path: &std::path::Path) -> Option<u64> {
         total += local_size(&entry.path())?;
     }
     Some(total)
+}
+
+fn remote_parent(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        None | Some(0) => "/".to_owned(),
+        Some(index) => trimmed[..index].to_owned(),
+    }
 }
 
 pub fn join_path(dir: &str, name: &str) -> String {

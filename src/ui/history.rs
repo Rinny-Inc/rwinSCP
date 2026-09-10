@@ -57,7 +57,17 @@ fn body(app: &App, ui: &mut Ui, action: &mut Option<Action>) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for (index, record) in app.history.iter().enumerate().rev() {
+            let mut order: Vec<usize> = (0..app.history.len()).collect();
+            order.sort_by_key(|&i| {
+                let active = matches!(
+                    app.history[i].state,
+                    TransferState::Running | TransferState::Queued
+                );
+                (!active, std::cmp::Reverse(i))
+            });
+
+            for index in order {
+                let record = &app.history[index];
                 row(ui, index, record, action);
                 ui.add_space(theme::S2);
             }

@@ -1,12 +1,34 @@
-use std::sync::mpsc::{Receiver, Sender};
+use std::{
+    env,
+    sync::mpsc::{Receiver, Sender},
+};
 
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/Rinny-Inc/rwinSCP/releases/latest";
 
 const USER_AGENT: &str = concat!("rwinSCP/", env!("CARGO_PKG_VERSION"));
 
+const ASSET_SUFFIX: Option<&str> = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    Some("macos-arm64.dmg")
+} else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+    Some("macos-x64.dmg")
+} else if cfg!(target_os = "linux") {
+    Some("linux-x64.AppImage")
+} else if cfg!(target_os = "windows") {
+    Some("windows-x64-setup.exe")
+} else {
+    None
+};
+
 #[derive(Debug, Clone)]
 pub struct Available {
     pub version: String,
+    pub url: String,
+    pub asset: Option<Asset>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Asset {
+    pub name: String,
     pub url: String,
 }
 
@@ -42,19 +64,37 @@ fn check(tx: &Sender<Available>) {
     let Some(tag) = json.get("tag_name").and_then(|t| t.as_str()) else {
         return;
     };
+
+    if !is_newer(tag, env!("CARGO_PKG_VERSION")) {
+        return;
+    }
     let url = json
         .get("html_url")
         .and_then(|u| u.as_str())
         .unwrap_or("https://github.com/Rinny-Inc/rwinSCP/releases")
         .to_owned();
 
-    if is_newer(tag, env!("CARGO_PKG_VERSION")) {
-        tx.send(Available {
-            version: tag.trim_start_matches('v').to_owned(),
-            url,
+    tx.send(Available {
+        version: tag.trim_start_matches('v').to_owned(),
+        url,
+        asset: platform_asset(&json),
+    })
+    .ok();
+}
+
+fn platform_asset(release: &serde_json::Value) -> Option<Asset> {
+    let suffix = ASSET_SUFFIX?;
+
+    release.get("assets")?.as_array()?.iter().find_map(|asset| {
+        let name = asset.get("name")?.as_str()?;
+        if !name.ends_with(suffix) {
+            return None;
+        }
+        Some(Asset {
+            name: name.to_owned(),
+            url: asset.get("browser_download_url")?.as_str()?.to_owned(),
         })
-        .ok();
-    }
+    })
 }
 
 fn is_newer(candidate: &str, current: &str) -> bool {
@@ -98,7 +138,44 @@ pub fn open_in_browser(url: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer;
+    use super::{is_newer, platform_asset};
+
+    #[test]
+    fn picks_the_asset_for_this_platform() {
+        let release = serde_json::json!({
+            "assets": [
+                { "name": "rwinSCP-macos-arm64.dmg",
+                  "browser_download_url": "https://example.invalid/arm64.dmg" },
+                { "name": "rwinSCP-macos-x64.dmg",
+                  "browser_download_url": "https://example.invalid/x64.dmg" },
+                { "name": "rwinSCP-0.9.7-linux-x64.AppImage",
+                  "browser_download_url": "https://example.invalid/app.AppImage" },
+                { "name": "rwinSCP-0.9.7-linux-x64.deb",
+                  "browser_download_url": "https://example.invalid/pkg.deb" },
+                { "name": "rwinSCP-0.9.7-windows-x64-setup.exe",
+                  "browser_download_url": "https://example.invalid/setup.exe" }
+            ]
+        });
+
+        let asset = platform_asset(&release).expect("this platform has an asset");
+        let expected = super::ASSET_SUFFIX.expect("this platform builds an asset");
+        assert!(
+            asset.name.ends_with(expected),
+            "picked {} for a platform expecting {expected}",
+            asset.name
+        );
+    }
+
+    #[test]
+    fn missing_asset_is_not_invented() {
+        let release = serde_json::json!({
+            "assets": [
+                { "name": "source.tar.gz",
+                  "browser_download_url": "https://example.invalid/source.tar.gz" }
+            ]
+        });
+        assert!(platform_asset(&release).is_none());
+    }
 
     #[test]
     fn detects_a_newer_release() {

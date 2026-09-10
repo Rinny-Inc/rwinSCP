@@ -7,6 +7,12 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crate::connection::{ConnectionProfile, Protocol};
 
+/// Shared chunk size for streamed transfers
+const CHUNK: usize = 64 * 1024;
+pub const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
 #[derive(Debug, Clone)]
 pub struct RemoteEntry {
     pub name: String,
@@ -239,10 +245,6 @@ fn walk_from(
     Ok(())
 }
 
-/// Shared chunk size for streamed transfers
-const CHUNK: usize = 64 * 1024;
-
-type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
 fn cancelled(flag: &Cancel) -> bool {
     flag.load(std::sync::atomic::Ordering::Relaxed)
 }

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ssh2::Session;
 
 use super::{CHUNK, Command, Event, RemoteEntry};
-use crate::backend::{Cancel, cancelled};
+use crate::backend::{Cancel, PROGRESS_INTERVAL, cancelled};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -455,6 +455,7 @@ fn pump<R: Read, W: Write>(
 ) -> anyhow::Result<()> {
     let mut buf = vec![0u8; CHUNK];
     let mut transferred = 0u64;
+    let mut last_report = std::time::Instant::now();
 
     loop {
         if cancelled(cancel) {
@@ -466,16 +467,29 @@ fn pump<R: Read, W: Write>(
         }
         dst.write_all(&buf[..read])?;
         transferred += read as u64;
-        evt_tx
-            .send(Event::Progress {
-                transferred,
-                total,
-                label: label.to_owned(),
-            })
-            .ok();
+
+        if last_report.elapsed() >= PROGRESS_INTERVAL {
+            last_report = std::time::Instant::now();
+            evt_tx
+                .send(Event::Progress {
+                    transferred,
+                    total,
+                    label: label.to_owned(),
+                })
+                .ok();
+        }
     }
 
     dst.flush()?;
+
+    evt_tx
+        .send(Event::Progress {
+            transferred,
+            total,
+            label: label.to_owned(),
+        })
+        .ok();
+
     Ok(())
 }
 

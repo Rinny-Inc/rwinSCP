@@ -32,7 +32,14 @@ pub fn show(app: &App, ui: &mut Ui) -> Option<Action> {
                     if widgets::ghost_button(ui, "Dismiss", true).clicked() {
                         action = Some(Action::DismissUpdate);
                     }
-                    if widgets::secondary_button(ui, "View release").clicked() {
+                    let (label, hover) = match &update.asset {
+                        Some(asset) => ("Download", asset.name.clone()),
+                        None => ("View release", "Open the release page".to_owned()),
+                    };
+                    if widgets::secondary_button(ui, label)
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
                         action = Some(Action::OpenUpdate);
                     }
                 });
