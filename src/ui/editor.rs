@@ -188,7 +188,7 @@ fn s3_fields(ui: &mut Ui, profile: &mut ConnectionProfile) {
                 .desired_width(f32::INFINITY),
         );
         ui.label(
-            RichText::new("set for MinIO, R2, Wasabu & friends")
+            RichText::new("set for MinIO, R2, Wasabi & friends")
                 .color(theme::TEXT_FAINT)
                 .small(),
         );
