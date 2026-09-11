@@ -30,14 +30,14 @@ pub fn run(
         let session = match connect(&profile, &cmd_rx, &evt_tx) {
             Ok(session) => session,
             Err(e) => {
-                evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+                evt_tx.send(Event::ConnectFailed(format!("{e:#}"))).ok();
                 return;
             }
         };
         evt_tx.send(Event::Connected).ok();
 
         if let Err(e) = run_shell(&session, cmd_rx, &evt_tx) {
-            evt_tx.send(Event::Error(e.to_string())).ok();
+            evt_tx.send(Event::Error(format!("{e:#}"))).ok();
         }
         session.set_blocking(true);
         session.disconnect(None, "bye", None).ok();

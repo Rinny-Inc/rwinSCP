@@ -26,14 +26,14 @@ pub fn show(ui: &mut Ui, profile: &mut ConnectionProfile, editing: bool) -> Opti
                 );
                 ui.end_row();
 
-                field(ui, "Protocol");
-                protocol_picker(ui, profile);
-                ui.end_row();
+                if !profile.protocol.is_object_store() {
+                    field(ui, "Protocol");
+                    protocol_picker(ui, profile);
+                    ui.end_row();
 
-                if profile.protocol.is_object_store() {
-                    s3_fields(ui, profile);
-                } else {
                     host_fields(ui, profile);
+                } else {
+                    s3_fields(ui, profile);
                 }
 
                 field(ui, "Start dir");
@@ -82,7 +82,7 @@ fn protocol_picker(ui: &mut Ui, profile: &mut ConnectionProfile) {
         .selected_text(profile.protocol.label())
         .width(ui.available_width())
         .show_ui(ui, |ui| {
-            for candidate in Protocol::ALL {
+            for candidate in [Protocol::Sftp, Protocol::Ftp, Protocol::Scp] {
                 let mut selected = profile.protocol;
                 if ui
                     .selectable_value(&mut selected, candidate, candidate.label())
@@ -178,6 +178,21 @@ fn host_fields(ui: &mut Ui, profile: &mut ConnectionProfile) {
 fn s3_fields(ui: &mut Ui, profile: &mut ConnectionProfile) {
     field(ui, "Bucket");
     ui.add(egui::TextEdit::singleline(&mut profile.bucket).desired_width(f32::INFINITY));
+    ui.end_row();
+
+    field(ui, "Endpoint");
+    ui.vertical(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut profile.endpoint())
+                .hint_text("blank for AWS")
+                .desired_width(f32::INFINITY),
+        );
+        ui.label(
+            RichText::new("set for MinIO, R2, Wasabu & friends")
+                .color(theme::TEXT_FAINT)
+                .small(),
+        );
+    });
     ui.end_row();
 
     field(ui, "Region");

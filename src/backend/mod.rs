@@ -173,7 +173,7 @@ fn drive<B: Backend>(
     let mut backend = match B::connect(&profile, &cmd_rx, &evt_tx) {
         Ok(backend) => backend,
         Err(e) => {
-            evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+            evt_tx.send(Event::ConnectFailed(format!("{e:#}"))).ok();
             return;
         }
     };
@@ -250,7 +250,7 @@ fn cancelled(flag: &Cancel) -> bool {
     flag.load(std::sync::atomic::Ordering::Relaxed)
 }
 fn classify(cmd: &Command, error: anyhow::Error) -> Event {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     let label = match cmd {
         Command::Download { remote_path, .. } => remote_path.clone(),
         Command::Upload { remote_path, .. } => remote_path.clone(),

@@ -21,7 +21,7 @@ pub fn run(
     {
         Ok(runtime) => runtime,
         Err(e) => {
-            evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+            evt_tx.send(Event::ConnectFailed(format!("{e:#}"))).ok();
             return;
         }
     };
@@ -30,7 +30,7 @@ pub fn run(
         let client = match build_client(&profile).await {
             Ok(client) => client,
             Err(e) => {
-                evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+                evt_tx.send(Event::ConnectFailed(format!("{e:#}"))).ok();
                 return;
             }
         };
@@ -42,7 +42,7 @@ pub fn run(
             .send()
             .await
         {
-            evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+            evt_tx.send(Event::ConnectFailed(format!("{e:#}"))).ok();
             return;
         }
         evt_tx.send(Event::Connected).ok();
@@ -51,7 +51,7 @@ pub fn run(
             let stop = matches!(cmd, Command::Disconnect);
             cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             if let Err(e) = handle(&client, &profile, &cmd, &evt_tx, &cancel).await {
-                evt_tx.send(Event::Error(e.to_string())).ok();
+                evt_tx.send(Event::Error(format!("{e:#}"))).ok();
             }
             if stop {
                 break;
@@ -82,6 +82,14 @@ async fn build_client(profile: &ConnectionProfile) -> anyhow::Result<Client> {
         .credentials_provider(credentials)
         .load()
         .await;
+
+    if !profile.endpoint().trim().is_empty() {
+        let s3 = aws_sdk_s3::config::Builder::from(&config)
+            .endpoint_url(profile.endpoint().trim())
+            .force_path_style(true)
+            .build();
+        return Ok(Client::from_conf(s3));
+    }
 
     Ok(Client::new(&config))
 }

@@ -10,14 +10,6 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 5] = [
-        Protocol::Ssh,
-        Protocol::Sftp,
-        Protocol::Scp,
-        Protocol::Ftp,
-        Protocol::S3,
-    ];
-
     pub fn label(self) -> &'static str {
         match self {
             Protocol::Ssh => "SSH",
@@ -95,6 +87,10 @@ pub struct ConnectionProfile {
     /// S3 only.
     pub bucket: String,
     pub region: String,
+    /// Custom S3 endpoint, Empty = AWS; set it for MinIO,
+    /// Cloudflare R2 and other S3-compatible services
+    #[allow(dead_code)]
+    pub endpoint: String,
     pub remote_start_dir: String,
 }
 
@@ -109,6 +105,7 @@ impl ConnectionProfile {
             auth: Auth::for_protocol(protocol),
             bucket: String::new(),
             region: "us-east-1".into(),
+            endpoint: String::new(),
             remote_start_dir: "/".into(),
         }
     }

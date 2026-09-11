@@ -18,7 +18,7 @@ pub fn run(
     let mut ftp = match connect(&profile) {
         Ok(ftp) => ftp,
         Err(e) => {
-            evt_tx.send(Event::ConnectFailed(e.to_string())).ok();
+            evt_tx.send(Event::ConnectFailed(format!("{e:#}"))).ok();
             return;
         }
     };

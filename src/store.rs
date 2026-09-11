@@ -26,6 +26,8 @@ struct StoredHost {
     key_path: String,
     #[serde(default)]
     access_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    endpoint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_used: Option<u64>,
 }
@@ -148,6 +150,7 @@ fn from_host(host: &Host) -> StoredHost {
         auth_kind: auth_kind.to_owned(),
         key_path,
         access_key,
+        endpoint: profile.endpoint().clone(),
         last_used: host.last_used.and_then(|time| {
             time.duration_since(std::time::UNIX_EPOCH)
                 .ok()
@@ -181,6 +184,7 @@ fn into_host(stored: StoredHost) -> Host {
         auth,
         bucket: stored.bucket,
         region: stored.region,
+        endpoint: stored.endpoint,
         remote_start_dir: if stored.remote_start_dir.is_empty() {
             "/".to_owned()
         } else {
