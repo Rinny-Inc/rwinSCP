@@ -136,6 +136,8 @@ fn handle(
 
         Command::Rename { from, to } => ftp.rename(from, to)?,
 
+        Command::ResizePty { .. } => {}
+
         Command::ShellInput(_) => anyhow::bail!("FTP has no remote shell"),
 
         Command::Exec { .. } => anyhow::bail!("FTP has no remote shell"),

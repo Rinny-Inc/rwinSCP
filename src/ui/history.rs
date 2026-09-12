@@ -125,6 +125,10 @@ fn row(ui: &mut Ui, index: usize, record: &TransferRecord, action: &mut Option<A
             .color(theme::TEXT_FAINT)
             .small(),
     );
+
+    if let Some(error) = &record.error {
+        ui.label(RichText::new(error).color(theme::DANGER).small());
+    }
 }
 
 fn detail_line(record: &TransferRecord) -> String {

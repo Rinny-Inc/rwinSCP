@@ -308,6 +308,8 @@ async fn handle(
                 .await?;
         }
 
+        Command::ResizePty { .. } => {}
+
         Command::ShellInput(_) => anyhow::bail!("S3 has not remote shell"),
 
         Command::Exec { .. } => anyhow::bail!("S3 has no remote shell"),

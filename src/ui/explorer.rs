@@ -138,12 +138,22 @@ fn breadcrumbs(ui: &mut Ui, cwd: &str, editing: Option<&mut String>) -> Option<A
             }
         }
 
-        ui.add_space(theme::S2);
-        if widgets::ghost_button(ui, icon::PENCIL, true)
-            .on_hover_text("Type a path")
-            .clicked()
-        {
-            action = Some(Action::EditPath);
+        let remaining = ui.available_size_before_wrap();
+        if remaining.x > 1.0 {
+            let (rect, click) = ui.allocate_exact_size(remaining, egui::Sense::click());
+            if click.clicked() {
+                action = Some(Action::EditPath);
+            }
+            if click.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(theme::S2, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    "type a path",
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    theme::TEXT_FAINT,
+                );
+            }
         }
     });
 

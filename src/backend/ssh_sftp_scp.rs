@@ -139,6 +139,9 @@ fn run_shell(
         let mut fatal = None;
         loop {
             match cmd_rx.try_recv() {
+                Ok(Command::ResizePty { cols, rows }) => {
+                    channel.request_pty_size(cols, rows, None, None).ok();
+                }
                 Ok(Command::ShellInput(data)) => {
                     let mut pending = data.as_bytes();
                     let deadline = Instant::now() + WRITE_TIMEOUT;
@@ -370,6 +373,8 @@ fn handle(
             channel.wait_close()?;
             evt_tx.send(Event::ExecOutput(output)).ok();
         }
+
+        Command::ResizePty { .. } => {}
 
         Command::ShellInput(_) => {
             anyhow::bail!("the interactive shell is only available over SSH")

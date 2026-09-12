@@ -47,6 +47,7 @@ pub struct TransferRecord {
     pub bytes: u64,
     pub total: Option<u64>,
     pub state: TransferState,
+    pub error: Option<String>,
     pub at: Instant,
     rate: f64,
     eta: Option<u64>,
@@ -125,6 +126,7 @@ pub struct Terminal {
     pub lines: std::collections::VecDeque<String>,
     pub current: String,
     pending_cr: bool,
+    pty_size: (u32, u32),
 }
 impl Terminal {
     pub fn row_count(&self) -> usize {
@@ -220,6 +222,7 @@ pub enum Action {
     CommitPath,
     CancelPath,
     ShellBytes(String),
+    ShellResize(u32, u32),
     Download,
     Upload,
     UploadFolder,
@@ -386,6 +389,7 @@ impl App {
             bytes: 0,
             total,
             state: TransferState::Queued,
+            error: None,
             at: Instant::now(),
             rate: 0.0,
             eta: None,
@@ -485,6 +489,7 @@ impl App {
                     Event::ConnectFailed(message) | Event::Error(message) => {
                         if let Some(record) = self.history.get_mut(job.record) {
                             record.state = TransferState::Failed;
+                            record.error = Some(message.clone());
                             logs.push((format!("{}: {message}", record.label), LogLevel::Error));
                         }
                         done = true;
@@ -623,6 +628,16 @@ impl App {
             Action::Navigate(path) => {
                 if let Some(session) = self.session_mut() {
                     session.navigate(path);
+                }
+            }
+
+            Action::ShellResize(cols, rows) => {
+                if let Some(session) = self.session_mut()
+                    && let Some(terminal) = &mut session.terminal
+                    && terminal.pty_size != (cols, rows)
+                {
+                    terminal.pty_size = (cols, rows);
+                    session.worker.send(Command::ResizePty { cols, rows });
                 }
             }
 

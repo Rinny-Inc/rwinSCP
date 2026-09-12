@@ -54,6 +54,13 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let row_height = ui.fonts_mut(|f| f.row_height(&font));
 
+        let advance = ui.fonts_mut(|f| f.glyph_width(&font, 'M'));
+        if advance > 0.0 && row_height > 0.0 {
+            let cols = (ui.available_width() / advance).floor().max(20.0) as u32;
+            let rows = (ui.available_height() / row_height).floor().max(4.0) as u32;
+            keep(&mut action, Some(Action::ShellResize(cols, rows)));
+        }
+
         egui::ScrollArea::vertical()
             .id_salt("terminal_scroll")
             .auto_shrink([false, false])

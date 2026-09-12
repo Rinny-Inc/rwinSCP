@@ -57,6 +57,10 @@ pub enum Command {
     },
     /// SSH only: raw bytes typed into interactive shell
     ShellInput(String),
+    ResizePty {
+        cols: u32,
+        rows: u32,
+    },
     TrustHostKey,
     Disconnect,
 }

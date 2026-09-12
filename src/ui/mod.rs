@@ -25,6 +25,8 @@ pub(crate) fn keep(slot: &mut Option<Action>, candidate: Option<Action>) {
 pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let mut action = None;
 
+    keep(&mut action, shortcuts(app, ui));
+
     keep(&mut action, update_banner::show(app, ui));
 
     egui::Panel::left("rail")
@@ -78,6 +80,53 @@ pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
     if !dropped.is_empty() && app.session().is_some_and(|s| s.terminal.is_none()) {
         keep(&mut action, Some(Action::DroppedFiles(dropped)));
     }
+
+    action
+}
+
+fn shortcuts(app: &App, ui: &mut Ui) -> Option<Action> {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+
+    let cmd = Modifiers::COMMAND;
+    let close = KeyboardShortcut::new(cmd, Key::W);
+    let locate = KeyboardShortcut::new(cmd, Key::L);
+
+    let in_terminal = app.session().is_some_and(|s| s.terminal.is_some());
+    let in_explorer = app.session().is_some_and(|s| s.terminal.is_none());
+
+    let mut action = None;
+
+    ui.input_mut(|i| {
+        if i.consume_shortcut(&close)
+            && let Some(index) = app.active
+        {
+            action = Some(Action::CloseTab(index));
+            return;
+        }
+
+        if in_explorer && i.consume_shortcut(&locate) {
+            action = Some(Action::EditPath);
+            return;
+        }
+
+        if in_explorer
+            && !in_terminal
+            && app.session().is_some_and(|s| !s.selection.is_empty())
+            && i.key_pressed(Key::Delete)
+            && i.modifiers.is_none()
+        {
+            i.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: Key::Delete,
+                        ..
+                    }
+                )
+            });
+            action = Some(Action::DeleteSelected);
+        }
+    });
 
     action
 }
