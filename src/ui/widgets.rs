@@ -1,4 +1,4 @@
-use egui::{Color32, CornerRadius, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Color32, CornerRadius, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::icon;
 use crate::theme;
@@ -14,8 +14,10 @@ pub fn section_label(ui: &mut Ui, text: &str) {
 
 pub fn page_heading(ui: &mut Ui, title: &str, subtitle: &str) {
     ui.label(RichText::new(title).color(theme::TEXT).heading().strong());
-    ui.add_space(theme::S1);
-    ui.label(RichText::new(subtitle).color(theme::TEXT_DIM));
+    if !subtitle.is_empty() {
+        ui.add_space(theme::S1);
+        ui.label(RichText::new(subtitle).color(theme::TEXT_DIM));
+    }
 }
 
 pub fn primary_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
@@ -160,16 +162,6 @@ pub fn fixed_card(
     add_contents(&mut content_ui);
 
     response
-}
-
-pub fn corner_glow(ui: &Ui, rect: Rect, color: Color32) {
-    let painter = ui.painter().with_clip_rect(rect);
-    let center = rect.left_top() + Vec2::new(rect.width() * 0.18, rect.height() * 0.10);
-    for step in 0..4 {
-        let radius = 30.0 + step as f32 * 18.0;
-        let alpha = 14u8.saturating_sub(step * 3);
-        painter.circle_filled(center, radius, theme::tint(color, alpha));
-    }
 }
 
 pub fn divider(ui: &mut Ui) {

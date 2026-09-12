@@ -15,13 +15,19 @@ pub fn show(ui: &mut Ui, index: usize, host: &Host) -> Option<Action> {
     let name = profile.display_name();
     let color = theme::host_color(name);
 
-    let response = widgets::fixed_card(ui, CARD_SIZE, theme::R_XL, PADDING, |ui| {
-        widgets::corner_glow(ui, ui.max_rect(), color);
+    let hovered = ui.rect_contains_pointer(egui::Rect::from_min_size(
+        ui.next_widget_position(),
+        CARD_SIZE,
+    ));
 
+    let response = widgets::fixed_card(ui, CARD_SIZE, theme::R_XL, PADDING, |ui| {
         ui.horizontal(|ui| {
             widgets::avatar(ui, name, color, 40.0);
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if !hovered {
+                    return;
+                }
                 if widgets::ghost_button(ui, icon::TRASH, true)
                     .on_hover_text("Remove host")
                     .clicked()

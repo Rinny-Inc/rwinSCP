@@ -1,6 +1,6 @@
 use egui::{Align2, CornerRadius, FontId, RichText, Sense, Ui, Vec2};
 
-use crate::app::{Action, App, Session, Status, human_size};
+use crate::app::{Action, App, Session, SortBy, human_size};
 use crate::icon;
 use crate::theme;
 use crate::ui::{keep, widgets};
@@ -12,8 +12,6 @@ const MODIFIED_COL: f32 = 148.0;
 pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let mut action = None;
 
-    keep(&mut action, header(ui, app.session()?));
-    ui.add_space(theme::S3);
     {
         let session = app.session_mut()?;
         let cwd = session.cwd.clone();
@@ -54,40 +52,6 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
             theme::TEXT,
         );
     }
-
-    action
-}
-
-fn header(ui: &mut Ui, session: &Session) -> Option<Action> {
-    let mut action = None;
-
-    ui.horizontal(|ui| {
-        if widgets::ghost_button(ui, &format!("{}  Hosts", icon::ARROW_LEFT), true).clicked() {
-            action = Some(Action::Disconnect);
-        }
-        ui.add_space(theme::S2);
-
-        let (color, label) = match session.status {
-            Status::Connected => (theme::OK, "connected"),
-            Status::Connecting => (theme::PENDING, "connecting"),
-        };
-        widgets::status_dot(ui, color, 8.0);
-        ui.label(
-            RichText::new(session.profile.display_name())
-                .color(theme::TEXT)
-                .strong(),
-        );
-        ui.label(RichText::new(label).color(theme::TEXT_FAINT).small());
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if widgets::ghost_button(ui, icon::ARROW_CLOCKWISE, true)
-                .on_hover_text("Refresh")
-                .clicked()
-            {
-                action = Some(Action::Refresh);
-            }
-        });
-    });
 
     action
 }
@@ -238,6 +202,15 @@ fn toolbar(ui: &mut Ui, session: &Session) -> Option<Action> {
         {
             action = Some(Action::DeleteSelected);
         }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if widgets::ghost_button(ui, icon::ARROW_CLOCKWISE, true)
+                .on_hover_text("Refresh")
+                .clicked()
+            {
+                action = Some(Action::Refresh);
+            }
+        });
     });
 
     action
@@ -246,7 +219,7 @@ fn toolbar(ui: &mut Ui, session: &Session) -> Option<Action> {
 fn table(ui: &mut Ui, session: &Session) -> Option<Action> {
     let mut action = None;
 
-    header_row(ui);
+    keep(&mut action, header_row(ui, session));
     widgets::divider(ui);
 
     if session.loading && session.entries.is_empty() {
@@ -357,33 +330,66 @@ fn table(ui: &mut Ui, session: &Session) -> Option<Action> {
     action
 }
 
-fn header_row(ui: &mut Ui) {
+fn header_row(ui: &mut Ui, session: &Session) -> Option<Action> {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
-    let painter = ui.painter();
     let font = FontId::proportional(10.5);
+    let mut action = None;
 
-    painter.text(
-        rect.left_center() + Vec2::new(theme::S2, 0.0),
-        Align2::LEFT_CENTER,
-        "NAME",
-        font.clone(),
-        theme::TEXT_FAINT,
-    );
-    painter.text(
-        egui::pos2(rect.right() - MODIFIED_COL - theme::S2, rect.center().y),
-        Align2::RIGHT_CENTER,
-        "SIZE",
-        font.clone(),
-        theme::TEXT_FAINT,
-    );
-    painter.text(
-        egui::pos2(rect.right() - theme::S2, rect.center().y),
-        Align2::RIGHT_CENTER,
-        "MODIFIED",
-        font,
-        theme::TEXT_FAINT,
-    );
+    let mut column = |ui: &mut Ui, label: &str, by: SortBy, right_edge: Option<f32>| {
+        let active = session.sort_by == by;
+
+        let galley = ui.painter().layout_no_wrap(
+            label.to_owned(),
+            font.clone(),
+            if active {
+                theme::TEXT
+            } else {
+                theme::TEXT_FAINT
+            },
+        );
+
+        let size = galley.size();
+
+        let pos = match right_edge {
+            Some(edge) => egui::pos2(rect.right() - edge - size.x, rect.center().y - size.y / 2.0),
+            None => egui::pos2(rect.left() + theme::S2, rect.center().y - size.y / 2.0),
+        };
+        let hit = egui::Rect::from_min_size(pos, size).expand2(egui::vec2(6.0, 4.0));
+        let response = ui.interact(hit, ui.id().with(label), Sense::click());
+        if response.clicked() {
+            action = Some(Action::SortBy(by));
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        ui.painter().galley(pos, galley, theme::TEXT);
+
+        if active {
+            let centre = egui::pos2(pos.x + size.x + 7.0, rect.center().y);
+            let (dy, tip) = if session.sort_ascending {
+                (2.0, -2.5)
+            } else {
+                (-2.0, 2.5)
+            };
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(centre.x - 3.5, centre.y + dy),
+                    egui::pos2(centre.x + 3.5, centre.y + dy),
+                    egui::pos2(centre.x, centre.y + tip * 2.0),
+                ],
+                theme::ACCENT,
+                egui::Stroke::NONE,
+            ));
+        }
+    };
+
+    column(ui, "NAME", SortBy::Name, None);
+    column(ui, "SIZE", SortBy::Size, Some(MODIFIED_COL + theme::S2));
+    column(ui, "MODIFIED", SortBy::Modified, Some(theme::S2));
+
+    action
 }
 
 fn rename_bar(ui: &mut Ui, og: &str, edited: &mut String) -> Option<Action> {

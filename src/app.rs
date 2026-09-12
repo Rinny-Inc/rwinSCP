@@ -144,6 +144,13 @@ pub struct SessionKey {
     pub shell: bool,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub enum SortBy {
+    Name,
+    Size,
+    Modified,
+}
+
 pub struct Session {
     pub key: SessionKey,
     pub profile: ConnectionProfile,
@@ -157,6 +164,8 @@ pub struct Session {
     pub terminal: Option<Terminal>,
     pub path_edit: Option<String>,
     pub rename: Option<(String, String)>,
+    pub sort_by: SortBy,
+    pub sort_ascending: bool,
 }
 
 impl Session {
@@ -196,6 +205,25 @@ impl Session {
         self.worker.send(Command::List { path });
     }
 
+    pub fn sort_entries(&mut self) {
+        let ascending = self.sort_ascending;
+        let by = self.sort_by.clone();
+
+        self.entries.sort_by(|a, b| {
+            let ordering = match by {
+                SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortBy::Size => a.size.cmp(&b.size),
+                SortBy::Modified => a.modified.cmp(&b.modified),
+            };
+            let ordering = if ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            };
+            b.is_dir.cmp(&a.is_dir).then(ordering)
+        });
+    }
+
     pub fn refresh(&mut self) {
         self.navigate(self.cwd.clone());
     }
@@ -212,7 +240,6 @@ pub enum Action {
     CancelEdit,
     SaveDraft,
     SaveDraftAndConnect,
-    Disconnect,
     Navigate(String),
     Refresh,
     BeginRename,
@@ -238,6 +265,7 @@ pub enum Action {
     DeleteSelected,
     ClickRow(usize, egui::Modifiers),
     OpenRow(usize),
+    SortBy(SortBy),
     ClearLog,
 }
 
@@ -616,10 +644,6 @@ impl App {
 
             Action::OpenShell(index) => self.connect(index, Some(Protocol::Ssh)),
 
-            Action::Disconnect => {
-                self.active = None;
-            }
-
             Action::SelectTab(index) => {
                 self.active = index.filter(|i| *i < self.sessions.len());
             }
@@ -784,6 +808,18 @@ impl App {
 
             Action::DeleteSelected => self.delete_selection(),
 
+            Action::SortBy(column) => {
+                if let Some(session) = self.session_mut() {
+                    if session.sort_by == column {
+                        session.sort_ascending = !session.sort_ascending;
+                    } else {
+                        session.sort_by = column;
+                        session.sort_ascending = true;
+                    }
+                    session.sort_entries();
+                }
+            }
+
             Action::ClearLog => self.log.clear(),
         }
     }
@@ -868,6 +904,8 @@ impl App {
             terminal: is_shell.then(Terminal::default),
             path_edit: None,
             rename: None,
+            sort_by: SortBy::Name,
+            sort_ascending: true,
         });
         self.active = Some(self.sessions.len() - 1);
     }
@@ -1009,14 +1047,10 @@ impl App {
                         closed.push(index);
                     }
 
-                    Event::Listing { path, mut entries } => {
-                        entries.sort_by(|a, b| {
-                            b.is_dir
-                                .cmp(&a.is_dir)
-                                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                        });
+                    Event::Listing { path, entries } => {
                         session.cwd = path;
                         session.entries = entries;
+                        session.sort_entries();
                         session.path_edit = None;
                         session.rename = None;
                         session.selection.clear();

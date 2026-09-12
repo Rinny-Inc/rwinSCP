@@ -15,11 +15,7 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
         .show(ui, |ui| {
             let content_width = ui.available_width();
 
-            widgets::page_heading(
-                ui,
-                "Hosts",
-                "Manage your saved servers and connect with one click",
-            );
+            widgets::page_heading(ui, "Hosts", "");
 
             ui.add_space(theme::S4);
             widgets::search_field(ui, &mut app.search, "Search hosts...");
@@ -67,10 +63,10 @@ fn actions_row(ui: &mut Ui) -> Option<Action> {
 
     ui.add_space(theme::S4);
     ui.horizontal(|ui| {
-        if widgets::secondary_button(ui, &format!("{}  NEW SERVER", icon::PLUS)).clicked() {
+        if widgets::secondary_button(ui, &format!("{}  New server", icon::PLUS)).clicked() {
             action = Some(Action::NewHost(Protocol::Sftp));
         }
-        if widgets::secondary_button(ui, &format!("{}  NEW S3", icon::CLOUD)).clicked() {
+        if widgets::secondary_button(ui, &format!("{}  New S3 bucket", icon::CLOUD)).clicked() {
             action = Some(Action::NewHost(Protocol::S3));
         }
         ui.add_enabled(
