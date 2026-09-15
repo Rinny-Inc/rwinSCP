@@ -68,13 +68,13 @@ fn body(app: &App, ui: &mut Ui, action: &mut Option<Action>) {
 
             for index in order {
                 let record = &app.history[index];
-                row(ui, index, record, action);
+                row(ui, record, action);
                 ui.add_space(theme::S2);
             }
         });
 }
 
-fn row(ui: &mut Ui, index: usize, record: &TransferRecord, action: &mut Option<Action>) {
+fn row(ui: &mut Ui, record: &TransferRecord, action: &mut Option<Action>) {
     let (glyph, tint) = match record.direction {
         Direction::Upload => (icon::UPLOAD, theme::ACCENT),
         Direction::Download => (icon::DOWNLOAD, theme::OK),
@@ -103,7 +103,7 @@ fn row(ui: &mut Ui, index: usize, record: &TransferRecord, action: &mut Option<A
                     .on_hover_text("Cancel this transfer")
                     .clicked()
             {
-                *action = Some(Action::CancelTransfer(index));
+                *action = Some(Action::CancelTransfer(record.id));
             }
         });
     });

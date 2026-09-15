@@ -31,7 +31,7 @@ impl Direction {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferState {
     Cancelled,
     Queued,
@@ -41,6 +41,7 @@ pub enum TransferState {
 }
 
 pub struct TransferRecord {
+    pub id: u64,
     pub label: String,
     pub host: String,
     pub direction: Direction,
@@ -112,12 +113,12 @@ pub struct PendingHostKey {
 pub struct PendingTransfer {
     profile: ConnectionProfile,
     command: Command,
-    record: usize,
+    record_id: u64,
 }
 
 pub struct TransferJob {
     worker: WorkerHandle,
-    record: usize,
+    record_id: u64,
     seen: std::collections::HashMap<String, u64>,
 }
 
@@ -126,6 +127,7 @@ pub struct Terminal {
     pub lines: std::collections::VecDeque<String>,
     pub current: String,
     pending_cr: bool,
+    overwrite: Option<usize>,
     pty_size: (u32, u32),
 }
 impl Terminal {
@@ -258,7 +260,7 @@ pub enum Action {
     DroppedFiles(Vec<std::path::PathBuf>),
     ToggleHistory,
     ClearHistory,
-    CancelTransfer(usize),
+    CancelTransfer(u64),
     OpenUpdate,
     DismissUpdate,
     Mkdir,
@@ -294,6 +296,7 @@ pub struct App {
     pub pending_host_key: Option<PendingHostKey>,
     update_check: Option<crate::update::UpdateCheck>,
     pub update_available: Option<crate::update::Available>,
+    next_transfer_id: u64,
     pub show_history: bool,
     pub show_log: bool,
 }
@@ -313,6 +316,7 @@ impl Default for App {
             pending_host_key: None,
             update_check: None,
             update_available: None,
+            next_transfer_id: 0,
             show_history: false,
             show_log: true,
         }
@@ -410,7 +414,11 @@ impl App {
         let host = session.profile.display_name().to_owned();
         let profile = session.profile.clone();
 
+        let id = self.next_transfer_id;
+        self.next_transfer_id += 1;
+
         self.history.push(TransferRecord {
+            id,
             label,
             host,
             direction,
@@ -424,22 +432,21 @@ impl App {
             sampled_at: Instant::now(),
             sampled_bytes: 0,
         });
-        if self.history.len() > HISTORY_CAPACITY {
-            let excess = self.history.len() - HISTORY_CAPACITY;
-            self.history.drain(..excess);
-            for job in &mut self.jobs {
-                job.record = job.record.saturating_sub(excess);
-            }
-            for pending in &mut self.queue {
-                pending.record = pending.record.saturating_sub(excess);
-            }
+        while self.history.len() > HISTORY_CAPACITY {
+            let Some(index) = self
+                .history
+                .iter()
+                .position(|r| !matches!(r.state, TransferState::Running | TransferState::Queued))
+            else {
+                break;
+            };
+            self.history.remove(index);
         }
 
-        let record = self.history.len() - 1;
         self.queue.push_back(PendingTransfer {
             profile,
             command,
-            record,
+            record_id: id,
         });
 
         self.show_history = true;
@@ -453,10 +460,10 @@ impl App {
             };
             let job = TransferJob {
                 worker: backend::spawn(pending.profile),
-                record: pending.record,
+                record_id: pending.record_id,
                 seen: std::collections::HashMap::new(),
             };
-            if let Some(record) = self.history.get_mut(pending.record) {
+            if let Some(record) = record_by_id(&mut self.history, job.record_id) {
                 let now = Instant::now();
 
                 record.state = TransferState::Running;
@@ -486,7 +493,7 @@ impl App {
                         total,
                         label,
                     } => {
-                        if let Some(record) = self.history.get_mut(job.record)
+                        if let Some(record) = record_by_id(&mut self.history, job.record_id)
                             && record.total.is_none()
                             && total > 0
                             && label == record.label
@@ -497,7 +504,7 @@ impl App {
                         busy = true;
                     }
                     Event::TransferDone { label } => {
-                        if let Some(record) = self.history.get_mut(job.record) {
+                        if let Some(record) = record_by_id(&mut self.history, job.record_id) {
                             record.bytes = job.seen.values().sum();
                             record.state = TransferState::Done;
                             if record.direction == Direction::Upload {
@@ -508,14 +515,14 @@ impl App {
                         done = true;
                     }
                     Event::TransferCancelled { label } => {
-                        if let Some(record) = self.history.get_mut(job.record) {
+                        if let Some(record) = record_by_id(&mut self.history, job.record_id) {
                             record.state = TransferState::Cancelled;
                             logs.push((format!("Cancelled {label}"), LogLevel::Info));
                         }
                         done = true;
                     }
                     Event::ConnectFailed(message) | Event::Error(message) => {
-                        if let Some(record) = self.history.get_mut(job.record) {
+                        if let Some(record) = record_by_id(&mut self.history, job.record_id) {
                             record.state = TransferState::Failed;
                             record.error = Some(message.clone());
                             logs.push((format!("{}: {message}", record.label), LogLevel::Error));
@@ -528,7 +535,7 @@ impl App {
                 }
             }
 
-            if !done && let Some(record) = self.history.get_mut(job.record) {
+            if !done && let Some(record) = record_by_id(&mut self.history, job.record_id) {
                 let moved: u64 = job.seen.values().sum();
                 if moved != record.bytes {
                     record.bytes = moved;
@@ -753,15 +760,15 @@ impl App {
             Action::ClearHistory => self.history.clear(),
 
             Action::CancelTransfer(record) => {
-                if let Some(job) = self.jobs.iter().find(|job| job.record == record) {
+                if let Some(job) = self.jobs.iter().find(|job| job.record_id == record) {
                     job.worker.cancel();
                 } else if let Some(position) = self
                     .queue
                     .iter()
-                    .position(|pending| pending.record == record)
+                    .position(|pending| pending.record_id == record)
                 {
                     self.queue.remove(position);
-                    if let Some(entry) = self.history.get_mut(record) {
+                    if let Some(entry) = record_by_id(&mut self.history, record) {
                         entry.state = TransferState::Cancelled;
                     }
                 }
@@ -1143,6 +1150,10 @@ impl eframe::App for App {
     }
 }
 
+fn record_by_id(history: &mut [TransferRecord], id: u64) -> Option<&mut TransferRecord> {
+    history.iter_mut().find(|record| record.id == id)
+}
+
 fn local_size(path: &std::path::Path) -> Option<u64> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.is_file() {
@@ -1274,12 +1285,34 @@ pub fn append_terminal_output(terminal: &mut Terminal, chunk: &str) {
 }
 
 fn finish_line(terminal: &mut Terminal) {
-    terminal
-        .lines
-        .push_back(std::mem::take(&mut terminal.current));
-    while terminal.lines.len() > TERMINAL_MAX_LINES {
-        terminal.lines.pop_front();
+    let line = std::mem::take(&mut terminal.current);
+
+    match terminal.overwrite {
+        Some(index) if index < terminal.lines.len() => {
+            terminal.lines[index] = line;
+            terminal.overwrite = Some(index + 1);
+        }
+        _ => {
+            terminal.overwrite = None;
+            terminal.lines.push_back(line);
+            while terminal.lines.len() > TERMINAL_MAX_LINES {
+                terminal.lines.pop_front();
+            }
+        }
     }
+}
+
+fn cursor_row(terminal: &Terminal) -> usize {
+    terminal.overwrite.unwrap_or(terminal.lines.len())
+}
+
+fn move_cursor(terminal: &mut Terminal, row: usize) {
+    terminal.current.clear();
+    terminal.overwrite = if row >= terminal.lines.len() {
+        None
+    } else {
+        Some(row)
+    };
 }
 
 fn control_sequence(terminal: &mut Terminal, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -1295,12 +1328,17 @@ fn control_sequence(terminal: &mut Terminal, chars: &mut std::iter::Peekable<std
 
             match c {
                 'A' => {
-                    terminal.current.clear();
-                    for _ in 0..n.min(terminal.lines.len()) {
-                        terminal.lines.pop_back();
-                    }
+                    let row = cursor_row(terminal).saturating_sub(n);
+                    move_cursor(terminal, row);
                 }
-                'K' | 'G' => terminal.current.clear(),
+                'B' => {
+                    let row = cursor_row(terminal) + n;
+                    move_cursor(terminal, row);
+                }
+                'K' if params.starts_with('1') || params.starts_with('2') => {
+                    terminal.current.clear();
+                }
+                'G' => terminal.current.clear(),
                 _ => {}
             }
             return;
@@ -1416,5 +1454,86 @@ mod progress_output {
         append_terminal_output(&mut terminal, "only\r\n");
         append_terminal_output(&mut terminal, "\u{1b}[99Areplaced\r\n");
         assert_eq!(terminal.lines, ["replaced"]);
+    }
+}
+
+#[cfg(test)]
+mod transfer_and_terminal_regressions {
+    use super::*;
+
+    fn record(id: u64, state: TransferState) -> TransferRecord {
+        TransferRecord {
+            id,
+            label: format!("t{id}"),
+            host: "h".into(),
+            direction: Direction::Upload,
+            bytes: 0,
+            total: None,
+            state,
+            error: None,
+            at: Instant::now(),
+            rate: 0.0,
+            eta: None,
+            sampled_at: Instant::now(),
+            sampled_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn trimming_history_keeps_unfinished_rows() {
+        let mut app = App::default();
+
+        app.history.push(record(0, TransferState::Running));
+        for id in 1..(HISTORY_CAPACITY as u64 + 20) {
+            app.history.push(record(id, TransferState::Done));
+            while app.history.len() > HISTORY_CAPACITY {
+                let Some(index) = app.history.iter().position(|r| {
+                    !matches!(r.state, TransferState::Running | TransferState::Queued)
+                }) else {
+                    break;
+                };
+                app.history.remove(index);
+            }
+        }
+
+        assert_eq!(app.history.len(), HISTORY_CAPACITY);
+        assert!(
+            app.history.iter().any(|r| r.id == 0),
+            "the running transfer must survive trimming"
+        );
+        assert_eq!(
+            record_by_id(&mut app.history, 0).map(|r| r.state.clone()),
+            Some(TransferState::Running)
+        );
+    }
+
+    #[test]
+    fn backspace_then_erase_keeps_the_rest_of_the_line() {
+        let mut t = Terminal::default();
+        append_terminal_output(&mut t, "hello worldX");
+        append_terminal_output(&mut t, "\u{8}\u{1b}[K");
+        assert_eq!(
+            t.current, "hello world",
+            "only the last character should go"
+        );
+    }
+
+    #[test]
+    fn two_progress_bars_do_not_accumulate() {
+        let mut t = Terminal::default();
+        append_terminal_output(&mut t, "a: 0%\r\nb: 0%\r\n");
+        for pct in [25, 50, 75] {
+            append_terminal_output(&mut t, &format!("\u{1b}[2Aa: {pct}%\u{1b}[K\r\n"));
+            append_terminal_output(&mut t, &format!("b: {pct}%\u{1b}[K\r\n"));
+        }
+        assert_eq!(t.lines, ["a: 75%", "b: 75%"], "got {:?}", t.lines);
+    }
+
+    #[test]
+    fn cursor_down_is_not_ignored() {
+        let mut t = Terminal::default();
+        append_terminal_output(&mut t, "one\r\ntwo\r\n");
+        append_terminal_output(&mut t, "\u{1b}[2A\u{1b}[1Btwo-updated\r\n");
+        assert_eq!(t.lines, ["one", "two-updated"], "got {:?}", t.lines);
     }
 }

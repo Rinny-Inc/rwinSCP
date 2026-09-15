@@ -11,7 +11,7 @@ suppaftp = "12.0.0"
 anyhow = "1.0.104"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
 aws-config = "1.12.0"
-aws-sdk-s3 = "1.146.0"
+aws-sdk-s3 = "1.147.0"
 bytes = "1.12.1"
 futures-util = "0.3.34"
 chrono = "0.4.45"
@@ -21,6 +21,10 @@ serde_json = "1"
 dirs = "7.0.0"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 keyring = "4.2.0"
+
+# TEMP FIX FOR aws-sdk-*
+[patch.crates-io]
+aws-smithy-json = { git = "https://github.com/smithy-lang/smithy-rs", rev = "6665fe66ac6c96b9d74ac99c47dfc3d036cd5a11" }
 
 [profile.release]
 opt-level = "z"
