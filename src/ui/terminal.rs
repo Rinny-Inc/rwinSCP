@@ -71,7 +71,13 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
 
                 for index in rows {
                     if index == last {
-                        draw_row_with_cursor(ui, terminal.row(index), font.clone(), row_height);
+                        draw_row_with_cursor(
+                            ui,
+                            terminal.row(index),
+                            terminal.cursor_col(),
+                            font.clone(),
+                            row_height,
+                        );
                     } else {
                         ui.label(
                             RichText::new(terminal.row(index))
@@ -182,12 +188,18 @@ fn encode_key(key: Key, modifiers: Modifiers) -> Option<String> {
 
 const CURSOR_BLINK: f64 = 0.53;
 
-fn draw_row_with_cursor(ui: &mut Ui, text: &str, font: egui::FontId, row_height: f32) {
+fn draw_row_with_cursor(ui: &mut Ui, text: &str, col: usize, font: egui::FontId, row_height: f32) {
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT));
     let advance = ui.fonts_mut(|f| f.glyph_width(&font, ' '));
     let width = galley.size().x + advance.max(2.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::hover());
-    let caret = rect.min + egui::vec2(galley.size().x, 0.0);
+    let caret_x = if col >= text.chars().count() {
+        galley.size().x
+    } else {
+        let prefix: String = text.chars().take(col).collect();
+        ui.fonts_mut(|f| f.layout_no_wrap(prefix, font.clone(), theme::TEXT).size().x)
+    };
+    let caret = rect.min + egui::vec2(caret_x, 0.0);
     ui.painter().galley(rect.min, galley, theme::TEXT);
 
     let time = ui.input(|i| i.time);

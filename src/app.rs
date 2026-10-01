@@ -126,6 +126,7 @@ pub struct TransferJob {
 pub struct Terminal {
     pub lines: std::collections::VecDeque<String>,
     pub current: String,
+    col: usize,
     pending_cr: bool,
     overwrite: Option<usize>,
     pty_size: (u32, u32),
@@ -133,6 +134,10 @@ pub struct Terminal {
 impl Terminal {
     pub fn row_count(&self) -> usize {
         self.lines.len() + 1
+    }
+
+    pub fn cursor_col(&self) -> usize {
+        self.col.min(self.current.chars().count())
     }
 
     pub fn row(&self, index: usize) -> &str {
@@ -1241,7 +1246,7 @@ pub fn append_terminal_output(terminal: &mut Terminal, chunk: &str) {
             chars.next();
             finish_line(terminal);
         } else {
-            terminal.current.clear();
+            terminal.col = 0;
         }
     }
 
@@ -1271,21 +1276,58 @@ pub fn append_terminal_output(terminal: &mut Terminal, chunk: &str) {
                     finish_line(terminal);
                 }
                 None => terminal.pending_cr = true,
-                _ => terminal.current.clear(),
+                _ => terminal.col = 0,
             },
-            '\u{8}' => {
-                terminal.current.pop();
-            }
+            '\u{8}' => terminal.col = terminal.col.saturating_sub(1),
 
             c if c.is_control() && c != '\t' => {}
 
-            c => terminal.current.push(c),
+            c => put_char(terminal, c),
         }
     }
 }
 
+fn byte_index(s: &str, col: usize) -> usize {
+    s.char_indices().nth(col).map_or(s.len(), |(i, _)| i)
+}
+
+fn put_char(terminal: &mut Terminal, c: char) {
+    let len = terminal.current.chars().count();
+    if terminal.col >= len {
+        for _ in len..terminal.col {
+            terminal.current.push(' ');
+        }
+        terminal.current.push(c);
+    } else {
+        let start = byte_index(&terminal.current, terminal.col);
+        let end = byte_index(&terminal.current, terminal.col + 1);
+        terminal
+            .current
+            .replace_range(start..end, c.encode_utf8(&mut [0u8; 4]));
+    }
+    terminal.col += 1;
+}
+fn delete_chars(terminal: &mut Terminal, n: usize) {
+    let len = terminal.current.chars().count();
+    if terminal.col >= len {
+        return;
+    }
+    let start = byte_index(&terminal.current, terminal.col);
+    let end = byte_index(&terminal.current, (terminal.col + n).min(len));
+    terminal.current.replace_range(start..end, "");
+}
+fn insert_blanks(terminal: &mut Terminal, n: usize) {
+    let len = terminal.current.chars().count();
+    if terminal.col > len {
+        return;
+    }
+    let at = byte_index(&terminal.current, terminal.col);
+    terminal.current.insert_str(at, &" ".repeat(n));
+}
+
 fn finish_line(terminal: &mut Terminal) {
     let line = std::mem::take(&mut terminal.current);
+    terminal.col = 0;
 
     match terminal.overwrite {
         Some(index) if index < terminal.lines.len() => {
@@ -1308,6 +1350,7 @@ fn cursor_row(terminal: &Terminal) -> usize {
 
 fn move_cursor(terminal: &mut Terminal, row: usize) {
     terminal.current.clear();
+    terminal.col = 0;
     terminal.overwrite = if row >= terminal.lines.len() {
         None
     } else {
@@ -1319,31 +1362,54 @@ fn control_sequence(terminal: &mut Terminal, chars: &mut std::iter::Peekable<std
     let mut params = String::new();
 
     for c in chars.by_ref() {
-        if ('\u{40}'..='\u{7E}').contains(&c) {
-            let n: usize = params
-                .split(';')
-                .next()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(1);
+        if !('\u{40}'..='\u{7E}').contains(&c) {
+            params.push(c);
+            continue;
+        }
 
-            match c {
-                'A' => {
-                    let row = cursor_row(terminal).saturating_sub(n);
-                    move_cursor(terminal, row);
-                }
-                'B' => {
-                    let row = cursor_row(terminal) + n;
-                    move_cursor(terminal, row);
-                }
-                'K' if params.starts_with('1') || params.starts_with('2') => {
-                    terminal.current.clear();
-                }
-                'G' => terminal.current.clear(),
-                _ => {}
-            }
+        if params.starts_with(['?', '>', '<', '=']) {
             return;
         }
-        params.push(c);
+
+        let raw = params
+            .split(';')
+            .next()
+            .and_then(|p| p.parse::<usize>().ok());
+        let n = raw.unwrap_or(1).max(1);
+        let mode = raw.unwrap_or(0);
+        let len = terminal.current.chars().count();
+
+        match c {
+            'A' => {
+                let row = cursor_row(terminal).saturating_sub(n);
+                move_cursor(terminal, row);
+            }
+            'B' => {
+                let row = cursor_row(terminal) + n;
+                move_cursor(terminal, row);
+            }
+            'C' => terminal.col += n,
+            'D' => terminal.col = terminal.col.saturating_sub(n),
+            'G' | '`' => terminal.col = n - 1,
+            'K' => match mode {
+                0 => {
+                    if terminal.col < len {
+                        let at = byte_index(&terminal.current, terminal.col);
+                        terminal.current.truncate(at);
+                    }
+                }
+                1 => {
+                    let upto = terminal.col.min(len);
+                    let at = byte_index(&terminal.current, upto);
+                    terminal.current.replace_range(..at, &" ".repeat(upto));
+                }
+                _ => terminal.current.clear(),
+            },
+            'P' => delete_chars(terminal, n),
+            '@' => insert_blanks(terminal, n),
+            _ => {}
+        }
+        return;
     }
 }
 
@@ -1395,8 +1461,73 @@ mod tests {
     }
 
     #[test]
-    fn backspace_removes_the_previous_character() {
+    fn backspace_moves_left_and_the_next_write_overwrites() {
         assert_eq!(feed("abc\u{8}d").current, "abd");
+    }
+
+    #[test]
+    fn arrow_left_does_not_delete_text() {
+        let mut t = feed("hello");
+        assert_eq!(t.cursor_col(), 5);
+        append_terminal_output(&mut t, "\u{8}\u{8}");
+        assert_eq!(t.current, "hello", "arrowing left must not erase anything");
+        assert_eq!(t.cursor_col(), 3);
+        append_terminal_output(&mut t, "X");
+        assert_eq!(t.current, "helXo");
+    }
+
+    #[test]
+    fn history_recall_keeps_the_prompt() {
+        let mut t = feed("tester@canada:/var/www/html$ cd /tmp");
+        append_terminal_output(&mut t, "\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}");
+        append_terminal_output(&mut t, "ls -la /var/log/nginx");
+        assert_eq!(
+            t.current, "tester@canada:/var/www/html$ ls -la /var/log/nginx",
+            "the prompt and its directory must survive history recall"
+        );
+    }
+
+    #[test]
+    fn history_recall_to_a_shorter_line_uses_delete_chars() {
+        let mut t = feed("tester@canada:/var/www/html$ ls -la /var/log/nginx");
+        append_terminal_output(&mut t, &"\u{8}".repeat(21));
+        append_terminal_output(&mut t, "\u{1b}[14Pcd /tmp");
+        assert_eq!(t.current, "tester@canada:/var/www/html$ cd /tmp");
+    }
+
+    #[test]
+    fn insert_mid_line_redraws_the_tail() {
+        let mut t = feed("echo two");
+        append_terminal_output(&mut t, "\u{8}\u{8}");
+        append_terminal_output(&mut t, "Xwo\u{8}\u{8}");
+        assert_eq!(t.current, "echo tXwo");
+        assert_eq!(t.cursor_col(), 7);
+    }
+
+    #[test]
+    fn cursor_right_skips_without_erasing() {
+        let mut t = feed("user@host:/var/log$ ls");
+        append_terminal_output(&mut t, "\r\u{1b}[20Ccat f\u{1b}[K");
+        assert_eq!(t.current, "user@host:/var/log$ cat f");
+    }
+
+    #[test]
+    fn erase_to_end_of_line_cuts_at_the_cursor() {
+        let mut t = feed("keep this and drop that");
+        append_terminal_output(&mut t, "\u{1b}[14G\u{1b}[K");
+        assert_eq!(t.current, "keep this and");
+    }
+
+    #[test]
+    fn insert_blanks_pushes_the_tail_right() {
+        let mut t = feed("abcdef");
+        append_terminal_output(&mut t, "\u{1b}[4G\u{1b}[2@");
+        assert_eq!(t.current, "abc  def");
+    }
+
+    #[test]
+    fn private_mode_switches_are_swallowed() {
+        assert_eq!(feed("\u{1b}[?25lhid\u{1b}[?25hden").current, "hidden");
     }
 
     #[test]
