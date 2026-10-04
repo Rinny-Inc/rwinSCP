@@ -547,9 +547,7 @@ impl Terminal {
         }
         for _ in 0..n.min(self.rows) {
             self.screen.rows.remove(self.screen.scroll_bot);
-            self.screen
-                .rows
-                .insert(self.screen.scroll_bot, blank_row(self.cols));
+            self.screen.rows.insert(row, blank_row(self.cols));
         }
     }
 
@@ -560,7 +558,9 @@ impl Terminal {
         }
         for _ in 0..n.min(self.rows) {
             self.screen.rows.remove(row);
-            self.screen.rows.insert(row, blank_row(self.cols));
+            self.screen
+                .rows
+                .insert(self.screen.scroll_bot, blank_row(self.cols));
         }
     }
 
@@ -613,7 +613,7 @@ impl Terminal {
                 49 => self.attrs.bg = None,
                 38 | 48 => {
                     let fg = args[i] == 38;
-                    let (color, _used) = extended_color(&args[i + 1..]);
+                    let (color, used) = extended_color(&args[i + 1..]);
                     if let Some(color) = color {
                         if fg {
                             self.attrs.fg = Some(color);
@@ -621,7 +621,7 @@ impl Terminal {
                             self.attrs.bg = Some(color);
                         }
                     }
-                    i += 1;
+                    i += used;
                 }
                 _ => {}
             }
@@ -682,8 +682,7 @@ fn xterm256(index: usize) -> Color32 {
         16..=231 => {
             const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
             let i = index - 16;
-            let i_d = i / 6;
-            Color32::from_rgb(LEVELS[i_d], LEVELS[i_d % 6], LEVELS[i % 6])
+            Color32::from_rgb(LEVELS[i / 36], LEVELS[(i / 6) % 6], LEVELS[i % 6])
         }
         _ => {
             let level = 8 + 10 * (index.min(255) - 232) as u8;
@@ -875,6 +874,48 @@ mod tests {
         assert!(t.app_cursor_keys());
         t.feed("\u{1b}[?1l");
         assert!(!t.app_cursor_keys());
+    }
+
+    #[test]
+    fn every_256_colour_index_resolves() {
+        for index in 0..=255 {
+            let mut t = Terminal::new(12, 2);
+            t.feed(&format!("\u{1b}[38;5;{index}mx\u{1b}[0m"));
+            assert_eq!(t.row_text(0), "x", "index {index} did not render");
+        }
+    }
+
+    #[test]
+    fn the_colour_cube_maps_to_the_right_corners() {
+        // 16 is the cube's black corner, 231 its white one
+        assert_eq!(xterm256(16), Color32::from_rgb(0, 0, 0));
+        assert_eq!(xterm256(231), Color32::from_rgb(255, 255, 255));
+        // 196 is pure red: index 180 -> (5, 0, 0)
+        assert_eq!(xterm256(196), Color32::from_rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn extended_colour_parameters_are_consumed() {
+        let t = feed("\u{1b}[38;2;1;7;0mplain");
+        let cell = &t.row_cells(0)[0];
+        assert_eq!(cell.attrs.fg, Some(Color32::from_rgb(1, 7, 0)));
+        assert!(!cell.attrs.bold, "the 1 is a colour channel, not bold");
+        assert!(
+            !cell.attrs.inverse,
+            "the 7 is a colour channel, not inverse"
+        );
+    }
+
+    #[test]
+    fn insert_lines_pushes_the_rest_of_the_region_down() {
+        let mut t = Terminal::new(10, 4);
+        t.feed("a\r\nb\r\nc\r\nd");
+        t.feed("\u{1b}[2;1H\u{1b}[1L"); // open a line at row 2
+        assert_eq!(
+            screen(&t),
+            ["a", "", "b", "c"],
+            "the rows below must move down, not be overwritten"
+        );
     }
 
     #[test]

@@ -175,7 +175,7 @@ fn encode_key(key: Key, modifiers: Modifiers, app_keys: bool) -> Option<String> 
     if let Some(final_byte) = cursor_final {
         return Some(if modifier_is_one {
             if app_keys {
-                format!("\x1b0{final_byte}")
+                format!("\x1bO{final_byte}")
             } else {
                 format!("\x1b[{final_byte}")
             }
