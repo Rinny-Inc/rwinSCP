@@ -45,16 +45,30 @@ pub fn root(app: &mut App, ui: &mut Ui) -> Option<Action> {
             });
     }
 
+    let full_screen = app
+        .session()
+        .is_some_and(|session| session.terminal.is_some());
+    let margin = if full_screen {
+        egui::Margin {
+            left: 8,
+            right: 8,
+            top: 10,
+            bottom: 6,
+        }
+    } else {
+        egui::Margin {
+            left: 24,
+            right: 24,
+            top: 20,
+            bottom: 12,
+        }
+    };
+
     egui::CentralPanel::default()
         .frame(
             egui::Frame::default()
                 .fill(theme::BG_BASE)
-                .inner_margin(egui::Margin {
-                    left: 24,
-                    right: 24,
-                    top: 20,
-                    bottom: 12,
-                }),
+                .inner_margin(margin),
         )
         .show(ui, |ui| {
             keep(&mut action, tabs::show(app, ui));

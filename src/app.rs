@@ -4,6 +4,7 @@ use std::time::{Instant, SystemTime};
 use crate::backend::{self, Command, Event, RemoteEntry, WorkerHandle};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
 use crate::ui;
+use crate::vt::{Terminal, append_terminal_output};
 
 pub struct Host {
     pub id: String,
@@ -120,29 +121,6 @@ pub struct TransferJob {
     worker: WorkerHandle,
     record_id: u64,
     seen: std::collections::HashMap<String, u64>,
-}
-
-#[derive(Default)]
-pub struct Terminal {
-    pub lines: std::collections::VecDeque<String>,
-    pub current: String,
-    col: usize,
-    pending_cr: bool,
-    overwrite: Option<usize>,
-    pty_size: (u32, u32),
-}
-impl Terminal {
-    pub fn row_count(&self) -> usize {
-        self.lines.len() + 1
-    }
-
-    pub fn cursor_col(&self) -> usize {
-        self.col.min(self.current.chars().count())
-    }
-
-    pub fn row(&self, index: usize) -> &str {
-        self.lines.get(index).map_or(self.current.as_str(), |l| l)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,9 +648,9 @@ impl App {
             Action::ShellResize(cols, rows) => {
                 if let Some(session) = self.session_mut()
                     && let Some(terminal) = &mut session.terminal
-                    && terminal.pty_size != (cols, rows)
+                    && terminal.pty_size() != (cols, rows)
                 {
-                    terminal.pty_size = (cols, rows);
+                    terminal.resize(cols, rows);
                     session.worker.send(Command::ResizePty { cols, rows });
                 }
             }
@@ -1235,184 +1213,6 @@ pub fn ellipsize(text: &str, max_chars: usize) -> String {
     }
 }
 
-const TERMINAL_MAX_LINES: usize = 5_000;
-
-pub fn append_terminal_output(terminal: &mut Terminal, chunk: &str) {
-    let mut chars = chunk.chars().peekable();
-
-    if terminal.pending_cr {
-        terminal.pending_cr = false;
-        if chars.peek() == Some(&'\n') {
-            chars.next();
-            finish_line(terminal);
-        } else {
-            terminal.col = 0;
-        }
-    }
-
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1B}' => match chars.next() {
-                Some('[') => control_sequence(terminal, &mut chars),
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\u{7}' {
-                            break;
-                        }
-                        if c == '\u{1B}' {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-
-            '\n' => finish_line(terminal),
-
-            '\r' => match chars.peek() {
-                Some('\n') => {
-                    chars.next();
-                    finish_line(terminal);
-                }
-                None => terminal.pending_cr = true,
-                _ => terminal.col = 0,
-            },
-            '\u{8}' => terminal.col = terminal.col.saturating_sub(1),
-
-            c if c.is_control() && c != '\t' => {}
-
-            c => put_char(terminal, c),
-        }
-    }
-}
-
-fn byte_index(s: &str, col: usize) -> usize {
-    s.char_indices().nth(col).map_or(s.len(), |(i, _)| i)
-}
-
-fn put_char(terminal: &mut Terminal, c: char) {
-    let len = terminal.current.chars().count();
-    if terminal.col >= len {
-        for _ in len..terminal.col {
-            terminal.current.push(' ');
-        }
-        terminal.current.push(c);
-    } else {
-        let start = byte_index(&terminal.current, terminal.col);
-        let end = byte_index(&terminal.current, terminal.col + 1);
-        terminal
-            .current
-            .replace_range(start..end, c.encode_utf8(&mut [0u8; 4]));
-    }
-    terminal.col += 1;
-}
-fn delete_chars(terminal: &mut Terminal, n: usize) {
-    let len = terminal.current.chars().count();
-    if terminal.col >= len {
-        return;
-    }
-    let start = byte_index(&terminal.current, terminal.col);
-    let end = byte_index(&terminal.current, (terminal.col + n).min(len));
-    terminal.current.replace_range(start..end, "");
-}
-fn insert_blanks(terminal: &mut Terminal, n: usize) {
-    let len = terminal.current.chars().count();
-    if terminal.col > len {
-        return;
-    }
-    let at = byte_index(&terminal.current, terminal.col);
-    terminal.current.insert_str(at, &" ".repeat(n));
-}
-
-fn finish_line(terminal: &mut Terminal) {
-    let line = std::mem::take(&mut terminal.current);
-    terminal.col = 0;
-
-    match terminal.overwrite {
-        Some(index) if index < terminal.lines.len() => {
-            terminal.lines[index] = line;
-            terminal.overwrite = Some(index + 1);
-        }
-        _ => {
-            terminal.overwrite = None;
-            terminal.lines.push_back(line);
-            while terminal.lines.len() > TERMINAL_MAX_LINES {
-                terminal.lines.pop_front();
-            }
-        }
-    }
-}
-
-fn cursor_row(terminal: &Terminal) -> usize {
-    terminal.overwrite.unwrap_or(terminal.lines.len())
-}
-
-fn move_cursor(terminal: &mut Terminal, row: usize) {
-    terminal.current.clear();
-    terminal.col = 0;
-    terminal.overwrite = if row >= terminal.lines.len() {
-        None
-    } else {
-        Some(row)
-    };
-}
-
-fn control_sequence(terminal: &mut Terminal, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    let mut params = String::new();
-
-    for c in chars.by_ref() {
-        if !('\u{40}'..='\u{7E}').contains(&c) {
-            params.push(c);
-            continue;
-        }
-
-        if params.starts_with(['?', '>', '<', '=']) {
-            return;
-        }
-
-        let raw = params
-            .split(';')
-            .next()
-            .and_then(|p| p.parse::<usize>().ok());
-        let n = raw.unwrap_or(1).max(1);
-        let mode = raw.unwrap_or(0);
-        let len = terminal.current.chars().count();
-
-        match c {
-            'A' => {
-                let row = cursor_row(terminal).saturating_sub(n);
-                move_cursor(terminal, row);
-            }
-            'B' => {
-                let row = cursor_row(terminal) + n;
-                move_cursor(terminal, row);
-            }
-            'C' => terminal.col += n,
-            'D' => terminal.col = terminal.col.saturating_sub(n),
-            'G' | '`' => terminal.col = n - 1,
-            'K' => match mode {
-                0 => {
-                    if terminal.col < len {
-                        let at = byte_index(&terminal.current, terminal.col);
-                        terminal.current.truncate(at);
-                    }
-                }
-                1 => {
-                    let upto = terminal.col.min(len);
-                    let at = byte_index(&terminal.current, upto);
-                    terminal.current.replace_range(..at, &" ".repeat(upto));
-                }
-                _ => terminal.current.clear(),
-            },
-            'P' => delete_chars(terminal, n),
-            '@' => insert_blanks(terminal, n),
-            _ => {}
-        }
-        return;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1433,163 +1233,10 @@ mod tests {
         assert_eq!(human_size(1024), "1.0 KB");
         assert_eq!(human_size(1_048_576), "1.0 MB");
     }
-
-    fn feed(chunk: &str) -> Terminal {
-        let mut terminal = Terminal::default();
-        append_terminal_output(&mut terminal, chunk);
-        terminal
-    }
-
-    #[test]
-    fn crlf_is_a_line_break_not_a_rewind() {
-        let terminal = feed("hello\r\nworld\r\n");
-        assert_eq!(terminal.lines, ["hello", "world"]);
-        assert_eq!(terminal.current, "");
-    }
-
-    #[test]
-    fn lone_cr_rewrites_the_current_line() {
-        let terminal = feed("50%\r100%");
-        assert!(terminal.lines.is_empty());
-        assert_eq!(terminal.current, "100%");
-    }
-
-    #[test]
-    fn colour_sequences_are_stripped() {
-        assert_eq!(feed("\u{1b}[32mgreen\u{1b}[0m text").current, "green text");
-        assert_eq!(feed("\u{1b}]0;window title\u{7}shell").current, "shell");
-    }
-
-    #[test]
-    fn backspace_moves_left_and_the_next_write_overwrites() {
-        assert_eq!(feed("abc\u{8}d").current, "abd");
-    }
-
-    #[test]
-    fn arrow_left_does_not_delete_text() {
-        let mut t = feed("hello");
-        assert_eq!(t.cursor_col(), 5);
-        append_terminal_output(&mut t, "\u{8}\u{8}");
-        assert_eq!(t.current, "hello", "arrowing left must not erase anything");
-        assert_eq!(t.cursor_col(), 3);
-        append_terminal_output(&mut t, "X");
-        assert_eq!(t.current, "helXo");
-    }
-
-    #[test]
-    fn history_recall_keeps_the_prompt() {
-        let mut t = feed("tester@canada:/var/www/html$ cd /tmp");
-        append_terminal_output(&mut t, "\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}");
-        append_terminal_output(&mut t, "ls -la /var/log/nginx");
-        assert_eq!(
-            t.current, "tester@canada:/var/www/html$ ls -la /var/log/nginx",
-            "the prompt and its directory must survive history recall"
-        );
-    }
-
-    #[test]
-    fn history_recall_to_a_shorter_line_uses_delete_chars() {
-        let mut t = feed("tester@canada:/var/www/html$ ls -la /var/log/nginx");
-        append_terminal_output(&mut t, &"\u{8}".repeat(21));
-        append_terminal_output(&mut t, "\u{1b}[14Pcd /tmp");
-        assert_eq!(t.current, "tester@canada:/var/www/html$ cd /tmp");
-    }
-
-    #[test]
-    fn insert_mid_line_redraws_the_tail() {
-        let mut t = feed("echo two");
-        append_terminal_output(&mut t, "\u{8}\u{8}");
-        append_terminal_output(&mut t, "Xwo\u{8}\u{8}");
-        assert_eq!(t.current, "echo tXwo");
-        assert_eq!(t.cursor_col(), 7);
-    }
-
-    #[test]
-    fn cursor_right_skips_without_erasing() {
-        let mut t = feed("user@host:/var/log$ ls");
-        append_terminal_output(&mut t, "\r\u{1b}[20Ccat f\u{1b}[K");
-        assert_eq!(t.current, "user@host:/var/log$ cat f");
-    }
-
-    #[test]
-    fn erase_to_end_of_line_cuts_at_the_cursor() {
-        let mut t = feed("keep this and drop that");
-        append_terminal_output(&mut t, "\u{1b}[14G\u{1b}[K");
-        assert_eq!(t.current, "keep this and");
-    }
-
-    #[test]
-    fn insert_blanks_pushes_the_tail_right() {
-        let mut t = feed("abcdef");
-        append_terminal_output(&mut t, "\u{1b}[4G\u{1b}[2@");
-        assert_eq!(t.current, "abc  def");
-    }
-
-    #[test]
-    fn private_mode_switches_are_swallowed() {
-        assert_eq!(feed("\u{1b}[?25lhid\u{1b}[?25hden").current, "hidden");
-    }
-
-    #[test]
-    fn rows_include_the_line_in_progress() {
-        let terminal = feed("one\r\ntwo\r\nthr");
-        assert_eq!(terminal.row_count(), 3);
-        assert_eq!(terminal.row(0), "one");
-        assert_eq!(terminal.row(2), "thr");
-    }
-
-    #[test]
-    fn terminal_scrollback_stays_bounded() {
-        let mut terminal = Terminal::default();
-        for i in 0..(TERMINAL_MAX_LINES * 2) {
-            append_terminal_output(&mut terminal, &format!("line {i}\r\n"));
-        }
-        assert_eq!(terminal.lines.len(), TERMINAL_MAX_LINES);
-        assert!(terminal.lines.front().unwrap().starts_with("line 5000"));
-    }
 }
 
 #[cfg(test)]
-mod progress_output {
-    use super::*;
-
-    #[test]
-    fn carriage_return_split_across_chunks() {
-        let mut terminal = Terminal::default();
-        append_terminal_output(&mut terminal, "hello\r");
-        append_terminal_output(&mut terminal, "\nworld\r\n");
-        assert_eq!(terminal.lines, ["hello", "world"]);
-    }
-
-    #[test]
-    fn single_line_progress_overwrites() {
-        let mut terminal = Terminal::default();
-        for pct in [10, 20, 30] {
-            append_terminal_output(&mut terminal, &format!("\u{1b}[2K\rProgress: {pct}%"));
-        }
-        assert!(terminal.lines.is_empty());
-        assert_eq!(terminal.current, "Progress: 30%");
-    }
-
-    #[test]
-    fn multi_line_progress_overwrites() {
-        let mut terminal = Terminal::default();
-        append_terminal_output(&mut terminal, "a: 10%\r\nb: 10%\r\n");
-        append_terminal_output(&mut terminal, "\u{1b}[2Aa: 20%\r\nb: 20%\r\n");
-        assert_eq!(terminal.lines, ["a: 20%", "b: 20%"]);
-    }
-
-    #[test]
-    fn cursor_up_past_the_top_is_clamped() {
-        let mut terminal = Terminal::default();
-        append_terminal_output(&mut terminal, "only\r\n");
-        append_terminal_output(&mut terminal, "\u{1b}[99Areplaced\r\n");
-        assert_eq!(terminal.lines, ["replaced"]);
-    }
-}
-
-#[cfg(test)]
-mod transfer_and_terminal_regressions {
+mod transfer_regressions {
     use super::*;
 
     fn record(id: u64, state: TransferState) -> TransferRecord {
@@ -1636,35 +1283,5 @@ mod transfer_and_terminal_regressions {
             record_by_id(&mut app.history, 0).map(|r| r.state.clone()),
             Some(TransferState::Running)
         );
-    }
-
-    #[test]
-    fn backspace_then_erase_keeps_the_rest_of_the_line() {
-        let mut t = Terminal::default();
-        append_terminal_output(&mut t, "hello worldX");
-        append_terminal_output(&mut t, "\u{8}\u{1b}[K");
-        assert_eq!(
-            t.current, "hello world",
-            "only the last character should go"
-        );
-    }
-
-    #[test]
-    fn two_progress_bars_do_not_accumulate() {
-        let mut t = Terminal::default();
-        append_terminal_output(&mut t, "a: 0%\r\nb: 0%\r\n");
-        for pct in [25, 50, 75] {
-            append_terminal_output(&mut t, &format!("\u{1b}[2Aa: {pct}%\u{1b}[K\r\n"));
-            append_terminal_output(&mut t, &format!("b: {pct}%\u{1b}[K\r\n"));
-        }
-        assert_eq!(t.lines, ["a: 75%", "b: 75%"], "got {:?}", t.lines);
-    }
-
-    #[test]
-    fn cursor_down_is_not_ignored() {
-        let mut t = Terminal::default();
-        append_terminal_output(&mut t, "one\r\ntwo\r\n");
-        append_terminal_output(&mut t, "\u{1b}[2A\u{1b}[1Btwo-updated\r\n");
-        assert_eq!(t.lines, ["one", "two-updated"], "got {:?}", t.lines);
     }
 }
