@@ -938,7 +938,9 @@ mod tests {
         }
         assert_eq!(
             screen(&t),
-            ["line 0", "line 1", "line 2", "line 3", "line 4", "line 5", ""]
+            [
+                "line 0", "line 1", "line 2", "line 3", "line 4", "line 5", ""
+            ]
         );
     }
 
@@ -1270,8 +1272,7 @@ mod tests {
 mod nano_golden {
     use super::*;
 
-    const SESSION: &str =
-        "nano /tmp/demo.txt\r\n\u{1b}[?2004l\r\u{1b}[?2004h\u{1b}[?1049h\u{1b}[22;0;0t\u{1b}[\
+    const SESSION: &str = "nano /tmp/demo.txt\r\n\u{1b}[?2004l\r\u{1b}[?2004h\u{1b}[?1049h\u{1b}[22;0;0t\u{1b}[\
      1;24r\u{1b}(B\u{1b}[m\u{1b}[4l\u{1b}[?7h\u{1b}[39;49m\u{1b}[?1h\u{1b}=\u{1b}[?1h\
      \u{1b}=\u{1b}[?25l\u{1b}[39;49m\u{1b}(B\u{1b}[m\u{1b}[H\u{1b}[2J\u{1b}[22;34H\u{1b}(\
      B\u{1b}[0;7m[ Reading... ]\u{1b}(B\u{1b}[m\u{1b}[22;33H\u{1b}(B\u{1b}[0;7m[ Read 3 l\
