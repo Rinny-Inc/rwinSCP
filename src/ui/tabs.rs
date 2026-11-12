@@ -116,7 +116,7 @@ fn tab(
         });
     ui.interact(
         inner.response.rect,
-        ui.id().with(("tab", id_salt)),
+        ui.scope_id().with(("tab", id_salt)),
         Sense::click(),
     )
 }

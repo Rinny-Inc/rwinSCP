@@ -50,14 +50,14 @@ impl UpdateCheck {
 
 fn check(tx: &Sender<Available>) {
     let Ok(response) = ureq::get(LATEST_RELEASE_API)
-        .set("User-Agent", USER_AGENT)
-        .set("Accept", "application/vnd.github+json")
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "application/vnd.github+json")
         .call()
     else {
         return;
     };
 
-    let Ok(json) = response.into_json::<serde_json::Value>() else {
+    let Ok(json) = response.into_body().read_json::<serde_json::Value>() else {
         return;
     };
 

@@ -72,6 +72,42 @@ enum State {
     CharSet,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+}
+impl Selection {
+    pub fn bounds(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+
+    pub fn columns_on(&self, row: usize, width: usize) -> Option<std::ops::Range<usize>> {
+        let (start, end) = self.bounds();
+        if row < start.0 || row > end.0 {
+            return None;
+        }
+        let from = if row == start.0 { start.1 } else { 0 };
+        let to = if row == end.0 { end.1 } else { width };
+        (from < to.min(width)).then(|| from..to.min(width))
+    }
+}
+
+#[derive(Default)]
+struct Echo {
+    trusted: bool,
+    awaiting: Option<char>,
+    drawn: Option<(usize, usize, Vec<Cell>)>,
+}
+
 pub struct Terminal {
     cols: usize,
     rows: usize,
@@ -84,6 +120,7 @@ pub struct Terminal {
     state: State,
     params: String,
     pty_size: (u32, u32),
+    echo: Echo,
 }
 impl Default for Terminal {
     fn default() -> Self {
@@ -104,6 +141,7 @@ impl Terminal {
             state: State::Ground,
             params: String::new(),
             pty_size: (0, 0),
+            echo: Echo::default(),
         }
     }
 
@@ -158,6 +196,27 @@ impl Terminal {
         text.trim_end().to_owned()
     }
 
+    pub fn selected_text(&self, selection: &Selection) -> String {
+        let (start, end) = selection.bounds();
+        let mut out = String::new();
+
+        for row in start.0..=end.0.min(self.row_count().saturating_sub(1)) {
+            let cells = self.row_cells(row);
+            let from = if row == start.0 { start.1 } else { 0 };
+            let to = if row == end.0 { end.1 } else { cells.len() };
+            let to = to.min(cells.len());
+
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            if from < to {
+                let line: String = cells[from..to].iter().map(|c| c.ch).collect();
+                out.push_str(line.trim_end());
+            }
+        }
+        out
+    }
+
     fn visible_rows(&self) -> usize {
         if self.parked.is_some() {
             return self.rows;
@@ -172,6 +231,7 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, cols: u32, rows: u32) {
+        self.forget_echo();
         self.pty_size = (cols, rows);
         let (cols, rows) = (cols.max(2) as usize, rows.max(2) as usize);
         if (cols, rows) == (self.cols, self.rows) {
@@ -225,6 +285,76 @@ impl Terminal {
     }
 }
 impl Terminal {
+    pub fn predict_input(&mut self, bytes: &str) {
+        if self.parked.is_some() {
+            self.forget_echo();
+            return;
+        }
+        for ch in bytes.chars() {
+            if ch.is_control() {
+                self.forget_echo();
+                self.echo.trusted = false;
+                return;
+            }
+            if self.echo.trusted {
+                self.draw_prediction(ch);
+            } else if self.echo.awaiting.is_none() {
+                self.echo.awaiting = Some(ch);
+            }
+        }
+    }
+    fn draw_prediction(&mut self, ch: char) {
+        let (row, col) = (self.screen.row, self.screen.col);
+        if col + 1 >= self.cols {
+            return;
+        }
+        if matches!(&self.echo.drawn, Some((drawn_row, _, _)) if *drawn_row != row) {
+            self.forget_echo();
+            return;
+        }
+        let covered = self
+            .screen
+            .rows
+            .get(row)
+            .and_then(|line| line.get(col))
+            .cloned()
+            .unwrap_or_default();
+        let drawn = self.echo.drawn.get_or_insert((row, col, Vec::new()));
+        drawn.2.push(covered);
+        self.put(ch);
+    }
+    fn rollback_prediction(&mut self) {
+        let Some((row, col, covered)) = self.echo.drawn.take() else {
+            return;
+        };
+        if let Some(line) = self.screen.rows.get_mut(row) {
+            for (offset, cell) in covered.into_iter().enumerate() {
+                if let Some(slot) = line.get_mut(col + offset) {
+                    *slot = cell;
+                }
+            }
+        }
+        self.screen.row = row;
+        self.screen.col = col;
+        self.screen.pending_wrap = false;
+    }
+
+    fn forget_echo(&mut self) {
+        self.rollback_prediction();
+        self.echo.awaiting = None;
+    }
+
+    fn note_echo(&mut self, chunk: &str) {
+        let Some(sent) = self.echo.awaiting else {
+            return;
+        };
+        let Some(printable) = chunk.chars().find(|c| !c.is_control() && *c != '\u{1b}') else {
+            return;
+        };
+        self.echo.awaiting = None;
+        self.echo.trusted = printable == sent;
+    }
+
     fn put(&mut self, ch: char) {
         if self.screen.pending_wrap {
             self.screen.pending_wrap = false;
@@ -306,6 +436,9 @@ impl Terminal {
 }
 impl Terminal {
     pub fn feed(&mut self, chunk: &str) {
+        self.rollback_prediction();
+        self.note_echo(chunk);
+
         for ch in chunk.chars() {
             match self.state {
                 State::Ground => self.ground(ch),
@@ -492,6 +625,9 @@ impl Terminal {
     }
 
     fn enter_alt_screen(&mut self) {
+        self.forget_echo();
+        self.echo.trusted = false;
+
         if self.parked.is_some() {
             return;
         }
@@ -500,6 +636,9 @@ impl Terminal {
     }
 
     fn leave_alt_screen(&mut self) {
+        self.forget_echo();
+        self.echo.trusted = false;
+
         if let Some(primary) = self.parked.take() {
             self.screen = primary;
             self.attrs = Attrs::default();
@@ -799,9 +938,7 @@ mod tests {
         }
         assert_eq!(
             screen(&t),
-            [
-                "line 0", "line 1", "line 2", "line 3", "line 4", "line 5", ""
-            ]
+            ["line 0", "line 1", "line 2", "line 3", "line 4", "line 5", ""]
         );
     }
 
@@ -874,6 +1011,157 @@ mod tests {
         assert!(t.app_cursor_keys());
         t.feed("\u{1b}[?1l");
         assert!(!t.app_cursor_keys());
+    }
+
+    fn selection(anchor: (usize, usize), head: (usize, usize)) -> Selection {
+        Selection { anchor, head }
+    }
+
+    #[test]
+    fn selecting_part_of_a_row_yields_just_that_text() {
+        let t = feed("hello world");
+        assert_eq!(t.selected_text(&selection((0, 6), (0, 11))), "world");
+        assert_eq!(t.selected_text(&selection((0, 0), (0, 5))), "hello");
+    }
+
+    #[test]
+    fn a_backwards_drag_reads_the_same_as_a_forwards_one() {
+        let t = feed("hello world");
+        assert_eq!(
+            t.selected_text(&selection((0, 11), (0, 6))),
+            t.selected_text(&selection((0, 6), (0, 11)))
+        );
+    }
+
+    #[test]
+    fn a_selection_spanning_rows_keeps_the_line_breaks() {
+        let t = feed("alpha\r\nbeta\r\ngamma");
+        assert_eq!(
+            t.selected_text(&selection((0, 2), (2, 3))),
+            "pha\nbeta\ngam"
+        );
+    }
+
+    #[test]
+    fn the_padding_of_the_grid_is_not_copied() {
+        let t = feed("hi\r\nthere");
+        assert_eq!(t.selected_text(&selection((0, 0), (1, 20))), "hi\nthere");
+    }
+
+    #[test]
+    fn an_unmoved_selection_covers_nothing() {
+        let t = feed("hello");
+        let sel = selection((0, 3), (0, 3));
+        assert!(sel.is_empty());
+        assert_eq!(t.selected_text(&sel), "");
+    }
+
+    #[test]
+    fn highlighted_columns_cover_the_rows_in_between() {
+        let sel = selection((1, 4), (3, 2));
+        assert_eq!(sel.columns_on(0, 10), None, "above the selection");
+        assert_eq!(sel.columns_on(1, 10), Some(4..10), "from the anchor to EOL");
+        assert_eq!(sel.columns_on(2, 10), Some(0..10), "a whole row");
+        assert_eq!(sel.columns_on(3, 10), Some(0..2), "up to the head");
+        assert_eq!(sel.columns_on(4, 10), None, "below the selection");
+    }
+
+    #[test]
+    fn a_prompt_that_never_echoes_shows_nothing() {
+        let mut t = Terminal::new(40, 6);
+        t.feed("Password: ");
+        for ch in "hunter2".chars() {
+            t.predict_input(&ch.to_string());
+        }
+        assert_eq!(
+            t.row_text(0),
+            "Password:",
+            "a password must never be drawn locally"
+        );
+    }
+
+    #[test]
+    fn the_first_character_of_a_line_is_never_drawn_early() {
+        let mut t = Terminal::new(40, 6);
+        t.feed("$ ");
+        t.predict_input("l");
+        assert_eq!(t.row_text(0), "$", "nothing is known about this line yet");
+    }
+
+    #[test]
+    fn once_the_remote_echoes_the_next_keystroke_appears_at_once() {
+        let mut t = Terminal::new(40, 6);
+        t.feed("$ ");
+        t.predict_input("l");
+        t.feed("l"); // the remote echoes it: this line echoes
+        t.predict_input("s");
+        assert_eq!(t.row_text(0), "$ ls", "the s is drawn before its echo");
+        assert_eq!(t.cursor(), Some((0, 4)));
+    }
+
+    #[test]
+    fn the_remotes_own_output_replaces_the_prediction() {
+        let mut t = Terminal::new(40, 6);
+        t.feed("$ ");
+        t.predict_input("l");
+        t.feed("l");
+        t.predict_input("s");
+        t.feed("X");
+        assert_eq!(t.row_text(0), "$ lX");
+    }
+
+    #[test]
+    fn enter_stops_the_guessing_until_the_next_line_echoes() {
+        let mut t = Terminal::new(40, 6);
+        t.feed("$ ");
+        t.predict_input("l");
+        t.feed("l");
+        t.predict_input("s");
+        t.predict_input("\r"); // Enter: trust is spent
+        t.feed("\r\nfile\r\n$ ");
+        t.predict_input("w");
+        assert!(
+            !t.row_text(2).contains('w'),
+            "a fresh line has to earn its echo again, got {:?}",
+            t.row_text(2)
+        );
+    }
+
+    #[test]
+    fn a_full_screen_program_is_never_predicted() {
+        let mut t = Terminal::new(40, 6);
+        t.feed("$ ");
+        t.predict_input("l");
+        t.feed("l");
+        t.feed("\u{1b}[?1049h"); // vim opens
+        t.predict_input("x");
+        assert_eq!(t.row_text(0), "", "nothing of ours on the alternate screen");
+    }
+
+    #[test]
+    fn a_prediction_never_wraps_past_the_margin() {
+        let mut t = Terminal::new(6, 4);
+        t.feed("ab");
+        t.predict_input("c");
+        t.feed("c"); // trusted now, cursor at column 3
+        t.predict_input("def"); // the f would land on the final column
+        assert_eq!(
+            t.row_text(0),
+            "abcde",
+            "the last column is left to the remote, which owns the wrap"
+        );
+    }
+
+    #[test]
+    fn a_control_key_drops_whatever_was_drawn() {
+        let mut t = Terminal::new(40, 6);
+        t.feed("$ ");
+        t.predict_input("l");
+        t.feed("l");
+        t.predict_input("s");
+        assert_eq!(t.row_text(0), "$ ls");
+        t.predict_input("\u{8}"); // backspace: unpredictable
+        assert_eq!(t.row_text(0), "$ l", "the guess is taken back");
     }
 
     #[test]
@@ -982,7 +1270,8 @@ mod tests {
 mod nano_golden {
     use super::*;
 
-    const SESSION: &str = "nano /tmp/demo.txt\r\n\u{1b}[?2004l\r\u{1b}[?2004h\u{1b}[?1049h\u{1b}[22;0;0t\u{1b}[\
+    const SESSION: &str =
+        "nano /tmp/demo.txt\r\n\u{1b}[?2004l\r\u{1b}[?2004h\u{1b}[?1049h\u{1b}[22;0;0t\u{1b}[\
      1;24r\u{1b}(B\u{1b}[m\u{1b}[4l\u{1b}[?7h\u{1b}[39;49m\u{1b}[?1h\u{1b}=\u{1b}[?1h\
      \u{1b}=\u{1b}[?25l\u{1b}[39;49m\u{1b}(B\u{1b}[m\u{1b}[H\u{1b}[2J\u{1b}[22;34H\u{1b}(\
      B\u{1b}[0;7m[ Reading... ]\u{1b}(B\u{1b}[m\u{1b}[22;33H\u{1b}(B\u{1b}[0;7m[ Read 3 l\

@@ -41,7 +41,7 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
             .input(|i| i.raw.screen_rect.unwrap_or(ui.max_rect()));
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("drop_overlay"),
+            egui::Id::unique("drop_overlay"),
         ));
         painter.rect_filled(screen, 0, theme::tint(theme::ACCENT, 26));
         painter.text(
@@ -356,7 +356,7 @@ fn header_row(ui: &mut Ui, session: &Session) -> Option<Action> {
             None => egui::pos2(rect.left() + theme::S2, rect.center().y - size.y / 2.0),
         };
         let hit = egui::Rect::from_min_size(pos, size).expand2(egui::vec2(6.0, 4.0));
-        let response = ui.interact(hit, ui.id().with(label), Sense::click());
+        let response = ui.interact(hit, ui.scope_id().with(label), Sense::click());
         if response.clicked() {
             action = Some(Action::SortBy(by));
         }

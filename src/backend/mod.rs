@@ -78,6 +78,8 @@ pub enum Event {
     Listing {
         path: String,
         entries: Vec<RemoteEntry>,
+        first: bool,
+        complete: bool,
     },
     Progress {
         transferred: u64,

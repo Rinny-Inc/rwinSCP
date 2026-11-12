@@ -17,6 +17,9 @@ const SHELL_IDLE: Duration = Duration::from_millis(20);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_RETRY: Duration = Duration::from_millis(5);
 
+const LIST_CHUNK: usize = 256;
+const LIST_INTERVAL: Duration = Duration::from_millis(120);
+
 const PTY_COLS: u32 = 120;
 const PTY_ROWS: u32 = 34;
 
@@ -225,23 +228,55 @@ fn handle(
 
     match cmd {
         Command::List { path } => {
-            let entries = need_sftp()?
-                .readdir(Path::new(path))?
-                .into_iter()
-                .filter_map(|(entry_path, stat)| {
-                    let name = entry_path.file_name()?.to_string_lossy().into_owned();
-                    (name != "." && name != "..").then(|| RemoteEntry {
-                        name,
-                        is_dir: stat.is_dir(),
-                        size: stat.size.unwrap_or(0),
-                        modified: stat.mtime.map(format_unix_time),
-                    })
-                })
-                .collect();
+            let mut dir = need_sftp()?.opendir(Path::new(path))?;
+            let mut batch: Vec<RemoteEntry> = Vec::new();
+            let mut first = true;
+            let mut since = Instant::now();
+
+            loop {
+                match dir.readdir() {
+                    Ok((entry_path, stat)) => {
+                        let Some(name) = entry_path.file_name() else {
+                            continue;
+                        };
+                        let name = name.to_string_lossy().into_owned();
+                        if name == "." || name == ".." {
+                            continue;
+                        }
+                        batch.push(RemoteEntry {
+                            name,
+                            is_dir: stat.is_dir(),
+                            size: stat.size.unwrap_or(0),
+                            modified: stat.mtime.map(format_unix_time),
+                        });
+                        if batch.len() >= LIST_CHUNK && since.elapsed() >= LIST_INTERVAL {
+                            evt_tx
+                                .send(Event::Listing {
+                                    path: path.clone(),
+                                    entries: std::mem::take(&mut batch),
+                                    first,
+                                    complete: false,
+                                })
+                                .ok();
+                            first = false;
+                            since = Instant::now();
+                        }
+                    }
+                    Err(e)
+                        if e.code()
+                            == ssh2::ErrorCode::Session(libssh2_sys::LIBSSH2_ERROR_FILE) =>
+                    {
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
             evt_tx
                 .send(Event::Listing {
                     path: path.clone(),
-                    entries,
+                    entries: batch,
+                    first,
+                    complete: true,
                 })
                 .ok();
         }

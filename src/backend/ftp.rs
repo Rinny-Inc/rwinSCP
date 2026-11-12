@@ -72,6 +72,8 @@ fn handle(
                 .send(Event::Listing {
                     path: path.clone(),
                     entries,
+                    first: true,
+                    complete: true,
                 })
                 .ok();
         }

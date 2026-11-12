@@ -4,7 +4,7 @@ use std::time::{Instant, SystemTime};
 use crate::backend::{self, Command, Event, RemoteEntry, WorkerHandle};
 use crate::connection::{Auth, ConnectionProfile, Protocol};
 use crate::ui;
-use crate::vt::{Terminal, append_terminal_output};
+use crate::vt::{Selection, Terminal, append_terminal_output};
 
 pub struct Host {
     pub id: String,
@@ -147,6 +147,7 @@ pub struct Session {
     pub anchor: Option<usize>,
     pub loading: bool,
     pub terminal: Option<Terminal>,
+    pub shell_selection: Option<Selection>,
     pub path_edit: Option<String>,
     pub rename: Option<(String, String)>,
     pub sort_by: SortBy,
@@ -235,6 +236,7 @@ pub enum Action {
     CancelPath,
     ShellBytes(String),
     ShellResize(u32, u32),
+    ShellSelect(Option<Selection>),
     Download,
     Upload,
     UploadFolder,
@@ -656,10 +658,20 @@ impl App {
             }
 
             Action::ShellBytes(bytes) => {
-                if let Some(session) = &self.session()
+                if let Some(session) = self.session_mut()
                     && session.terminal.is_some()
                 {
+                    session.shell_selection = None;
+                    if let Some(terminal) = &mut session.terminal {
+                        terminal.predict_input(&bytes);
+                    }
                     session.worker.send(Command::ShellInput(bytes));
+                }
+            }
+
+            Action::ShellSelect(selection) => {
+                if let Some(session) = self.session_mut() {
+                    session.shell_selection = selection.filter(|s| !s.is_empty());
                 }
             }
 
@@ -892,6 +904,7 @@ impl App {
             anchor: None,
             loading: true,
             terminal: is_shell.then(Terminal::default),
+            shell_selection: None,
             path_edit: None,
             rename: None,
             sort_by: SortBy::Name,
@@ -1037,15 +1050,26 @@ impl App {
                         closed.push(index);
                     }
 
-                    Event::Listing { path, entries } => {
-                        session.cwd = path;
-                        session.entries = entries;
-                        session.sort_entries();
-                        session.path_edit = None;
-                        session.rename = None;
-                        session.selection.clear();
-                        session.anchor = None;
-                        session.loading = false;
+                    Event::Listing {
+                        path,
+                        entries,
+                        first,
+                        complete,
+                    } => {
+                        if first {
+                            session.cwd = path;
+                            session.entries = entries;
+                            session.path_edit = None;
+                            session.rename = None;
+                            session.selection.clear();
+                            session.anchor = None;
+                        } else {
+                            session.entries.extend(entries);
+                        }
+                        if complete {
+                            session.sort_entries();
+                            session.loading = false;
+                        }
                     }
 
                     Event::Progress { .. } => {}

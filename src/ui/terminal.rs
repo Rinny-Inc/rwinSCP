@@ -1,7 +1,7 @@
 use crate::app::{Action, App};
 use crate::theme;
 use crate::ui::{keep, widgets};
-use crate::vt::{Attrs, Cell};
+use crate::vt::{Attrs, Cell, Selection};
 use egui::{Event, Key, Modifiers, RichText, Ui};
 
 pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
@@ -17,9 +17,15 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
         .as_ref()
         .is_some_and(|t| t.app_cursor_keys());
 
-    let keystrokes = ui.input_mut(|i| {
-        let bytes = encode_events(&i.events, app_keys);
-        if !bytes.is_empty() {
+    let selection = session.shell_selection;
+    let copy_text = selection
+        .and_then(|sel| session.terminal.as_ref().map(|t| t.selected_text(&sel)))
+        .filter(|text| !text.is_empty());
+
+    let (keystrokes, copied) = ui.input_mut(|i| {
+        let copying = copy_text.is_some() && i.events.iter().any(|e| matches!(e, Event::Copy));
+        let bytes = encode_events(&i.events, app_keys, copying);
+        if !bytes.is_empty() || copying {
             i.events.retain(|event| {
                 !matches!(
                     event,
@@ -27,8 +33,12 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 )
             });
         }
-        bytes
+        (bytes, copying)
     });
+
+    if copied && let Some(text) = copy_text {
+        ui.ctx().copy_text(text);
+    }
 
     if !keystrokes.is_empty() {
         keep(&mut action, Some(Action::ShellBytes(keystrokes)));
@@ -68,7 +78,9 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
         if advance > 0.0 && row_height > 0.0 {
             let cols = (ui.available_width() / advance).floor().max(20.0) as u32;
             let rows = (pane_height / row_height).floor().max(4.0) as u32;
-            keep(&mut action, Some(Action::ShellResize(cols, rows)));
+            if terminal.pty_size() != (cols, rows) {
+                keep(&mut action, Some(Action::ShellResize(cols, rows)));
+            }
         }
 
         let pad = top_padding(
@@ -85,29 +97,83 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
             .id_salt("terminal_scroll")
             .auto_shrink([false, false])
             .stick_to_bottom(true)
+            .scroll_source(egui::containers::scroll_area::ScrollSource {
+                drag: egui::containers::scroll_area::DragScroll::Never,
+                ..Default::default()
+            })
             .show_rows(ui, row_height, terminal.row_count(), |ui, rows| {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 let caret = terminal.cursor();
+                let cell_width = advance.max(2.0);
+
+                let first_index = rows.start;
+                let mut origin = None;
+                let mut pressed = None;
+                let mut dragged = None;
+                let mut cleared = false;
 
                 for index in rows {
                     let caret_col = caret.filter(|(row, _)| *row == index).map(|(_, col)| col);
-                    draw_row(
+                    let response = draw_row(
                         ui,
                         terminal.row_cells(index),
                         caret_col,
+                        selection.as_ref(),
+                        index,
                         &font,
                         row_height,
                         advance,
                     );
+
+                    if origin.is_none() {
+                        origin = Some(response.rect.min);
+                    }
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                    }
+                    if response.drag_started() {
+                        pressed = response.interact_pointer_pos();
+                    }
+                    if response.dragged() {
+                        dragged = response.interact_pointer_pos();
+                    }
+                    if response.clicked() {
+                        cleared = true;
+                    }
                 }
+
+                let Some(origin) = origin else {
+                    return;
+                };
+                let at = |pos: egui::Pos2, snap: fn(f32) -> f32| {
+                    let row = ((pos.y - origin.y) / row_height).floor().max(0.0) as usize;
+                    let col = snap((pos.x - origin.x) / cell_width).max(0.0) as usize;
+                    (first_index + row, col)
+                };
+                let update = if let Some(pos) = pressed {
+                    let anchor = at(pos, f32::floor);
+                    let head = dragged.map_or(anchor, |p| at(p, f32::round));
+                    Some(Some(Selection { anchor, head }))
+                } else if let Some(pos) = dragged {
+                    selection.map(|mut current| {
+                        current.head = at(pos, f32::round);
+                        Some(current)
+                    })
+                } else if cleared && selection.is_some() {
+                    Some(None)
+                } else {
+                    None
+                };
+
+                keep(&mut action, update.map(Action::ShellSelect));
             });
     });
 
     action
 }
 
-fn encode_events(events: &[Event], app_keys: bool) -> String {
+fn encode_events(events: &[Event], app_keys: bool, suppress_copy: bool) -> String {
     let mut out = String::new();
 
     for event in events {
@@ -127,12 +193,8 @@ fn encode_events(events: &[Event], app_keys: bool) -> String {
 
             Event::Paste(text) => out.push_str(text),
 
-            // egui turns Ctrl+C into a Copy event before it ever reaches
-            // the key handler. In a terminal that chord means interrupt;
-            // copying is Ctrl+Shift+C.
-            Event::Copy => out.push('\u{3}'),
+            Event::Copy if !suppress_copy => out.push('\u{3}'),
 
-            // Ctrl+X likewise.
             Event::Cut => out.push('\u{18}'),
 
             _ => {}
@@ -256,22 +318,40 @@ fn row_layout(cells: &[Cell], font: &egui::FontId) -> egui::text::LayoutJob {
     job
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_row(
     ui: &mut Ui,
     cells: &[Cell],
     caret_col: Option<usize>,
+    selection: Option<&Selection>,
+    index: usize,
     font: &egui::FontId,
     row_height: f32,
     advance: f32,
-) {
+) -> egui::Response {
     let galley = ui.fonts_mut(|f| f.layout_job(row_layout(cells, font)));
     let cell_width = advance.max(2.0);
     let width = (galley.size().x + cell_width).max(ui.available_width());
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::click_and_drag());
+
+    if let Some(columns) = selection.and_then(|sel| sel.columns_on(index, cells.len().max(1))) {
+        let left = rect.min.x + columns.start as f32 * cell_width;
+        let right = rect.min.x + columns.end as f32 * cell_width;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(left, rect.min.y),
+                egui::pos2(right.min(rect.max.x), rect.max.y),
+            ),
+            0,
+            theme::tint(theme::ACCENT, 70),
+        );
+    }
+
     ui.painter().galley(rect.min, galley, theme::TEXT);
 
     let Some(col) = caret_col else {
-        return;
+        return response;
     };
 
     let caret = rect.min + egui::vec2(col as f32 * cell_width, 0.0);
@@ -287,6 +367,7 @@ fn draw_row(
 
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs_f64(CURSOR_BLINK));
+    response
 }
 
 #[cfg(test)]
@@ -363,6 +444,29 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_interrupts_when_nothing_is_selected() {
+        assert_eq!(
+            encode_events(&[Event::Copy], false, false),
+            "\u{3}",
+            "with no selection the chord must still reach the shell"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_copies_instead_of_interrupting_when_text_is_selected() {
+        assert_eq!(
+            encode_events(&[Event::Copy], false, true),
+            "",
+            "a selection takes the chord; nothing is sent to the shell"
+        );
+    }
+
+    #[test]
+    fn cut_still_sends_the_interrupt_character() {
+        assert_eq!(encode_events(&[Event::Cut], false, true), "\u{18}");
+    }
+
+    #[test]
     fn enter_and_backspace_match_terminal_convention() {
         let plain = Modifiers::default();
         assert_eq!(encode_key(Key::Enter, plain, false).as_deref(), Some("\r"));
@@ -401,6 +505,8 @@ mod layout_tests {
                     ui,
                     terminal.row_cells(index),
                     None,
+                    None,
+                    index,
                     &font,
                     row_height,
                     advance,
@@ -459,6 +565,8 @@ mod scroll_geometry_tests {
                                 ui,
                                 terminal.row_cells(index),
                                 None,
+                                None,
+                                index,
                                 &font,
                                 row_height,
                                 advance,

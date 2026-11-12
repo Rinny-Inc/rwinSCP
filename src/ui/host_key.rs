@@ -10,7 +10,7 @@ pub fn show(app: &App, ctx: &Context) -> Option<Action> {
     let pending = app.pending_host_key.as_ref()?;
     let mut action = None;
 
-    egui::Modal::new(egui::Id::new("host_key_prompt")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::unique("host_key_prompt")).show(ctx, |ui| {
         ui.set_width(460.0);
 
         ui.label(

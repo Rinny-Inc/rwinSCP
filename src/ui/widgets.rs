@@ -93,7 +93,7 @@ pub fn pill(ui: &mut Ui, id_salt: &str, add_contents: impl FnOnce(&mut Ui)) -> R
 
     let response = ui.interact(
         inner.response.rect,
-        ui.id().with(("pill", id_salt)),
+        ui.scope_id().with(("pill", id_salt)),
         Sense::click(),
     );
     if response.hovered() {
